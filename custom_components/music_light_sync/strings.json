@@ -1,0 +1,91 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Music Light Sync",
+        "description": "Connects to Music Assistant's Sendspin server as a light player. After setup, approve the new player in Music Assistant, then group it with the speaker you want the lights to follow.",
+        "data": {
+          "name": "Name (shown as a player in Music Assistant)",
+          "lights": "ZHA color lights (a light group helper is expanded)",
+          "host": "Music Assistant host",
+          "port": "Sendspin port"
+        },
+        "data_description": {
+          "lights": "Every light must be a ZHA light. Order matters: the first bulb gets the bass band in Max reactive mode.",
+          "host": "The machine running Music Assistant. For the add-on, the Home Assistant host's IP address works.",
+          "port": "Music Assistant's Sendspin server listens on 8927."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not reach the Sendspin server at that host and port.",
+      "not_zha": "Every selected light (and every member of a selected group) must be a ZHA light."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Light show options",
+        "data": {
+          "zha_group_id": "ZHA group for unison color changes",
+          "rate_max": "Zigbee frame budget",
+          "group_min_interval": "Minimum spacing between group commands",
+          "min_brightness": "Minimum brightness",
+          "max_brightness": "Maximum brightness",
+          "pause_entities": "Pause during a show",
+          "end_delay": "Restore the lights after this much silence",
+          "ambient_period": "Ambient palette cycle",
+          "fallback_player": "Fallback player for ambient mode"
+        },
+        "data_description": {
+          "zha_group_id": "Optional. A ZHA group containing exactly these bulbs. One multicast frame then changes every bulb at once, but multicast floods the whole mesh, so it is rate limited separately.",
+          "rate_max": "Upper limit of unicast Zigbee frames per second for the show. The governor backs off automatically when the mesh gets slow. 12 is a safe start for 5 bulbs.",
+          "group_min_interval": "Multicast frames use the coordinator's small broadcast table. Keep this at 2 s or more.",
+          "pause_entities": "Automations, switches (for example adaptive lighting) or input booleans that are turned off during a show and back on afterwards, if they were on.",
+          "end_delay": "Pausing, skipping and short gaps between tracks do not restore the lights unless the silence lasts longer than this.",
+          "fallback_player": "Optional. When this player is playing but the light player is not grouped with it (for example the Node on its native hi-res path), the bulbs run the ambient palette from its album art."
+        }
+      }
+    },
+    "error": {
+      "group_members": "That ZHA group must contain exactly the configured bulbs, no more and no fewer. Extra members would be left in show colors.",
+      "group_missing": "That ZHA group no longer exists."
+    }
+  },
+  "entity": {
+    "switch": {
+      "sync": {
+        "name": "Sync"
+      }
+    },
+    "select": {
+      "effect": {
+        "name": "Effect",
+        "state": {
+          "beat_breathe": "Beat breathe",
+          "bar_color_shift": "Bar color shift",
+          "max_reactive": "Max reactive",
+          "ambient_palette": "Ambient palette"
+        }
+      }
+    },
+    "number": {
+      "latency_offset": {
+        "name": "Latency offset"
+      }
+    },
+    "sensor": {
+      "status": {
+        "name": "Status",
+        "state": {
+          "disconnected": "Disconnected",
+          "connecting": "Connecting",
+          "awaiting_approval": "Waiting for approval in Music Assistant",
+          "idle": "Idle",
+          "syncing": "Syncing",
+          "ambient_fallback": "Ambient (fallback player)"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "domain": "music_light_sync",
+  "name": "Music Light Sync",
+  "after_dependencies": ["zha", "group", "music_assistant", "media_player"],
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/OWNER/music-light-sync",
+  "integration_type": "device",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/OWNER/music-light-sync/issues",
+  "loggers": ["aiosendspin"],
+  "requirements": ["aiosendspin==10.2.0"],
+  "version": "0.1.0"
+}
