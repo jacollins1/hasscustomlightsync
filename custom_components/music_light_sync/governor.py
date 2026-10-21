@@ -22,11 +22,15 @@ from dataclasses import dataclass
 
 from .engine import GROUP, STALE_US, Command
 
-RTT_HIGH_S = 0.35  # a round trip slower than this means the mesh is struggling
-RTT_LOW_S = 0.15  # below this there is headroom to speed up again
-BACKOFF_FACTOR = 0.7
-INCREASE_STEP = 0.5
-INCREASE_EVERY_S = 3.0
+# Hue bulbs on ZHA typically answer in 100-250 ms, and a burst of one frame
+# per bulb queues briefly, so judge the smoothed round trip, not single frames.
+RTT_HIGH_S = 0.45  # smoothed round trip above this: the mesh is struggling
+RTT_SPIKE_S = 1.2  # a single frame this slow counts as trouble on its own
+RTT_LOW_S = 0.30  # smoothed round trip below this: room to speed up again
+BACKOFF_FACTOR = 0.75
+BACKOFF_EVERY_S = 2.0  # at most one backoff per window, not one per slow frame
+INCREASE_STEP = 1.0
+INCREASE_EVERY_S = 2.0
 DEFAULT_ONE_WAY_S = 0.06  # until we have measurements
 
 
@@ -65,6 +69,7 @@ class Governor:
         self._last_refill_s: float | None = None
         self._last_group_s: float | None = None
         self._last_increase_s = 0.0
+        self._last_backoff_s = -BACKOFF_EVERY_S
         self._pending: dict[tuple[int, str], Command] = {}
         self._sent_at: deque[float] = deque(maxlen=400)
 
@@ -125,9 +130,16 @@ class Governor:
             self.rtt_s = rtt_s if self.rtt_s is None else 0.8 * self.rtt_s + 0.2 * rtt_s
         if not ok:
             self.stats.errors += 1
-        if not ok or (rtt_s is not None and rtt_s > RTT_HIGH_S):
-            self.rate = max(self.rate_min, self.rate * BACKOFF_FACTOR)
-            self._last_increase_s = now_s
+        struggling = (
+            not ok
+            or (rtt_s is not None and rtt_s > RTT_SPIKE_S)
+            or (self.rtt_s is not None and self.rtt_s > RTT_HIGH_S)
+        )
+        if struggling:
+            if now_s - self._last_backoff_s >= BACKOFF_EVERY_S:
+                self.rate = max(self.rate_min, self.rate * BACKOFF_FACTOR)
+                self._last_backoff_s = now_s
+                self._last_increase_s = now_s
         elif self.rtt_s is not None and self.rtt_s < RTT_LOW_S and now_s - self._last_increase_s >= INCREASE_EVERY_S:
             self.rate = min(self.rate_max, self.rate + INCREASE_STEP)
             self._last_increase_s = now_s

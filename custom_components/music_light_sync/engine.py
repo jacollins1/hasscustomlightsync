@@ -154,7 +154,7 @@ class EffectEngine:
         self._last_group_us: int | None = None
         self._bar_count = 0
         self._breathe_bars = 0
-        self._heading_to_peak = True  # a show starts from the primed full brightness
+        self._last_flash = False
         self._bar_len = 4  # beats per bar, learned from downbeats when tracked
         self._palette_shift = 0
         self._recolor_idx = 0
@@ -222,8 +222,10 @@ class EffectEngine:
     def _pulse_divisor(self) -> int:
         """Pulse every d beats so per-bulb pulses fit in 75 % of the budget."""
         beats_per_s = 1e6 / self.beat_interval_us
+        # Level frames only: color frames are lower priority and coalesce in the governor.
+        frames_per_pulse = self.settings.bulbs
         divisor = 1
-        while divisor < 8 and self.settings.bulbs * beats_per_s / divisor > 0.75 * self.budget_per_s:
+        while divisor < 8 and frames_per_pulse * beats_per_s / divisor > 0.75 * self.budget_per_s:
             divisor *= 2
         return divisor
 
@@ -337,40 +339,43 @@ class EffectEngine:
         return ts + self.beat_interval_us * divisor, (self._beat_in_bar + divisor) % meter == 0
 
     def _breathe(self, ts: int, bar_start: bool, out: list[Command]) -> None:
-        """Ramp brightness between pulses so peaks land on beats, downbeats always."""
+        """Flash on the beat, release before the next one.
+
+        One frame per bulb per pulse: a flash pulse jumps to full brightness
+        with no fade (the eye locks onto that attack), and the next pulse fades
+        back down over the whole gap. Bar starts always flash, so in 4/4 the
+        flashes land on beats 1 and 3, and in 3/4 on beat 1.
+        """
         divisor = self._pulse_divisor()
         if divisor <= 2:
             if self._beat_in_bar % divisor and not bar_start:
                 return
             next_ts, next_is_bar = self._next_pulse(ts, divisor)
-            # Head for a peak on every bar start; otherwise alternate, so in 4/4
-            # the peaks fall on beats 1 and 3 (and in 3/4 the light holds high
-            # from beat 3 into beat 1).
-            next_is_peak = next_is_bar or not self._heading_to_peak
         else:
-            # Fast tempo or tight budget: pulse once per bar (or every 2 bars)
-            # and alternate peak/trough from pulse to pulse.
+            # Fast tempo or tight budget: pulse once per bar (or every 2 bars).
             if not bar_start:
                 return
             self._breathe_bars += 1
             if divisor == 8 and self._breathe_bars % 2:
                 return
-            next_ts = ts + self.beat_interval_us * divisor
-            next_is_peak = not self._heading_to_peak
-        self._heading_to_peak = next_is_peak
+            next_ts, next_is_bar = ts + self.beat_interval_us * divisor, True
+        flash = not self._last_flash and (bar_start or not next_is_bar)
+        self._last_flash = flash
         span = max(100_000, next_ts - ts)
         s = self.settings
-        if next_is_peak:
+        if flash:
             loud = self._loud_norm(ts, ts + span)
             depth = 0.55 + 0.45 * (loud if loud is not None else 1.0)
             level = round(s.min_level + (s.max_level - s.min_level) * depth)
+            transition = 0
         else:
             level = s.min_level
-        transition = _ds(span)
+            transition = _ds(span * 0.9)
         for bulb in range(s.bulbs):
             out.append(Command(ts, bulb, level, None, transition, PRIO_BEAT))
             self._last_level[bulb] = level
-        self._rolling_color(ts, bar_start, span, out)
+        if flash:
+            self._rolling_color(ts, bar_start, 200_000, out)
 
     def _rolling_color(self, ts: int, bar_start: bool, span_us: int, out: list[Command]) -> None:
         """Advance colors: whole group on every Nth bar, else one bulb per pulse."""

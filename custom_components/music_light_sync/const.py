@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Final
 
 DOMAIN: Final = "music_light_sync"
-VERSION: Final = "0.1.0"
+VERSION: Final = "0.1.1"
 
 # Config entry data
 CONF_HOST: Final = "host"
@@ -45,7 +45,7 @@ SPECTRUM_F_MAX: Final = 12000
 VISUALIZER_RATE: Final = 15
 
 TICK_S: Final = 0.02
-USER_OFFSET_RANGE_MS: Final = 1000
+USER_OFFSET_RANGE_MS: Final = 2000
 
 # Hue color bulbs use gamut C.
 HUE_GAMUT_C: Final = ((0.6915, 0.3083), (0.17, 0.7), (0.1532, 0.0475))

@@ -34,50 +34,49 @@ def feed_beats(engine: EffectEngine, first: int, count: int, interval: int = BEA
     return stamps
 
 
-def test_breathe_peaks_land_on_beats_one_and_three() -> None:
+def test_breathe_flashes_on_beats_one_and_three() -> None:
     engine = EffectEngine(EngineSettings(bulbs=5, min_level=40, max_level=254), Mode.BREATHE)
-    engine.budget_per_s = 20  # 5 bulbs x 2 beats/s = 10 <= 0.75 x 20: pulse every beat
+    engine.budget_per_s = 20  # 5 frames/pulse x 2 beats/s = 10 <= 0.75 x 20: pulse every beat
     engine.tracks_downbeats = True
     beats = feed_beats(engine, 1_000_000, 16)
     sent = run(engine, 0, beats[-1])
     levels = [(t, c) for t, c in sent if c.level is not None and c.target == 0]
-    # One level frame per beat for bulb 0, sent exactly `lead` before the beat.
+    # One level frame per beat for bulb 0, sent `lead` before the beat.
     assert [c.effect_us for _, c in levels] == beats
-    assert all(c.effect_us - t <= LEAD and c.effect_us - t > LEAD - 20_000 for t, c in levels)
-    # A ramp started on beat k reaches its target on beat k+1 (transition = 1 beat).
-    assert all(c.transition_ds == 5 for _, c in levels)
-    # Targets: the ramp that ENDS on beats 1 and 3 of each bar is HIGH.
-    by_beat = {c.effect_us: c.level for _, c in levels}
-    for i, ts in enumerate(beats[:-1]):
-        reaches = (i + 1) % 4  # bar position of the beat this ramp arrives at
-        if reaches in (0, 2):
-            assert by_beat[ts] > 40, f"beat {i} should ramp up"
-        else:
-            assert by_beat[ts] == 40, f"beat {i} should ramp down"
+    assert all(LEAD - 20_000 < c.effect_us - t <= LEAD for t, c in levels)
+    for i, (_, cmd) in enumerate(levels):
+        if i % 4 in (0, 2):  # beats 1 and 3: instant attack to full
+            assert cmd.level > 40 and cmd.transition_ds == 0, f"beat {i} should flash"
+        else:  # beats 2 and 4: release over most of the beat
+            assert cmd.level == 40 and cmd.transition_ds == 4, f"beat {i} should release"
+    # Colors only change on flashes.
+    color_times = {c.effect_us for _, c in sent if c.rgb is not None}
+    assert color_times <= {ts for i, ts in enumerate(beats) if i % 4 in (0, 2)}
 
 
 def test_breathe_halves_pulse_rate_when_budget_is_tight() -> None:
     engine = EffectEngine(EngineSettings(bulbs=5), Mode.BREATHE)
-    engine.budget_per_s = 12  # 10 frames/s would exceed 75 % of 12
+    engine.budget_per_s = 12  # 10 level frames/s would exceed 75 % of 12
     engine.tracks_downbeats = True
     beats = feed_beats(engine, 1_000_000, 16)
     sent = run(engine, 0, beats[-1])
-    level_frames = [c for _, c in sent if c.level is not None]
+    frames = [c for _, c in sent]
     seconds = (beats[-1] - beats[0]) / 1e6
-    assert len(level_frames) / seconds <= 0.75 * 12 + 1
-    assert {c.transition_ds for c in level_frames} == {10}  # two beats per ramp
+    assert len(frames) / seconds <= 0.75 * 12 + 1
+    bulb0 = [c for c in frames if c.level is not None and c.target == 0]
+    assert [c.effect_us for c in bulb0] == beats[::2]  # beats 1 and 3
+    assert [c.transition_ds for c in bulb0[:2]] == [0, 9]  # flash, then release over 2 beats
 
 
 def test_breathe_fast_tempo_pulses_per_bar_and_still_alternates() -> None:
     engine = EffectEngine(EngineSettings(bulbs=5, min_level=40), Mode.BREATHE)
-    engine.budget_per_s = 6  # 5 bulbs x 3.3 beats/s: divisor 4, one pulse per bar
+    engine.budget_per_s = 7  # 5 frames x 3.3 pulses/s: divisor 4, one pulse per bar
     engine.tracks_downbeats = True
     beats = feed_beats(engine, 1_000_000, 32, interval=300_000)  # 200 BPM
     sent = run(engine, 0, beats[-1])
     bulb0 = [c for _, c in sent if c.level is not None and c.target == 0]
     assert [c.effect_us for c in bulb0] == beats[::4]
-    levels = [c.level for c in bulb0]
-    assert len(set(levels[::2])) == 1 and len(set(levels[1::2])) == 1 and levels[0] != levels[1]
+    assert [c.transition_ds == 0 for c in bulb0] == [i % 2 == 0 for i in range(len(bulb0))]
 
 
 def test_stale_beats_are_skipped_not_sent_late() -> None:
@@ -171,15 +170,27 @@ def test_tempo_estimate_uses_upcoming_beats() -> None:
     assert engine.bpm == 128.0
 
 
-def test_breathe_in_three_four_peaks_on_every_downbeat() -> None:
+def test_breathe_in_three_four_flashes_on_every_downbeat() -> None:
     engine = EffectEngine(EngineSettings(bulbs=1, min_level=40), Mode.BREATHE)
     engine.budget_per_s = 20
     engine.tracks_downbeats = True
     beats = feed_beats(engine, 1_000_000, 13, bar=3)
     sent = run(engine, 0, beats[-1])
-    ramps = {c.effect_us: c for _, c in sent if c.level is not None and c.priority == PRIO_BEAT}
-    for i, ts in enumerate(beats[:-1]):
-        target_is_downbeat = (i + 1) % 3 == 0
-        if target_is_downbeat:
-            assert ramps[ts].level > 40, f"ramp from beat {i} must peak on the downbeat"
-        assert ramps[ts].transition_ds == 5
+    pulses = {c.effect_us: c for _, c in sent if c.level is not None and c.priority == PRIO_BEAT}
+    for i, ts in enumerate(beats):
+        flash = pulses[ts].transition_ds == 0 and pulses[ts].level > 40
+        assert flash == (i % 3 == 0), f"beat {i}"
+
+
+def test_107_bpm_pulses_every_beat_at_default_budget() -> None:
+    """Jon's test track: 107-108 BPM must flash on beats 1 and 3 at the default 12 frames/s."""
+    engine = EffectEngine(EngineSettings(bulbs=5, min_level=40), Mode.BREATHE)
+    engine.budget_per_s = 12
+    engine.tracks_downbeats = True
+    beats = feed_beats(engine, 1_000_000, 16, interval=560_748)  # 107 BPM
+    sent = run(engine, 0, beats[-1])
+    bulb0 = [c for _, c in sent if c.level is not None and c.target == 0]
+    assert [c.effect_us for c in bulb0] == beats
+    flashes = [c.effect_us for c in bulb0 if c.transition_ds == 0]
+    assert flashes == [ts for i, ts in enumerate(beats) if i % 4 in (0, 2)]
+    assert len(sent) / ((beats[-1] - beats[0]) / 1e6) <= 12

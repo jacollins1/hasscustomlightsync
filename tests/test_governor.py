@@ -60,18 +60,27 @@ def test_group_frames_spaced() -> None:
 
 def test_aimd_backs_off_and_recovers() -> None:
     gov = Governor(rate_max=12, rate_min=2)
-    gov.inflight = 3
-    gov.on_result(0.0, 0.6, True)
-    assert gov.rate < 12
-    gov.on_result(0.1, None, False)
-    low = gov.rate
-    assert low < 12 * 0.7
-    t = 1.0
-    for _ in range(200):
-        gov.on_result(t, 0.04, True)
-        t += 0.5
+    gov.inflight = 50
+    # Normal Hue/ZHA round trips (~200 ms, with burst queuing) must NOT back off.
+    t = 0.0
+    for i in range(200):
+        gov.on_result(t, 0.15 if i % 5 else 0.42, True)
+        t += 0.1
     assert gov.rate == 12
-    assert 0.015 < gov.one_way_s < 0.05
+    # A congested mesh: smoothed RTT climbs well above 450 ms -> back off, once per window.
+    for _ in range(20):
+        gov.on_result(t, 0.9, True)
+        t += 0.1
+    assert 12 * 0.75**2 - 0.01 <= gov.rate < 12  # 2 s of trouble = at most 2 backoffs
+    low = gov.rate
+    gov.on_result(t, None, False)
+    assert gov.rate <= low
+    # Healthy again: climbs back to the cap.
+    for _ in range(300):
+        gov.on_result(t, 0.12, True)
+        t += 0.1
+    assert gov.rate == 12
+    assert 0.05 < gov.one_way_s < 0.07
 
 
 def test_inflight_limit() -> None:

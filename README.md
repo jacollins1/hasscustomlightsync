@@ -16,7 +16,7 @@ Music Assistant already analyzes the audio it decodes. This integration connects
 
 ## What to expect
 
-- **Beat breathe** (default): brightness rises and falls between beats, always peaking on beat 1. Colors come from the album art and roll across the bulbs.
+- **Beat breathe** (default): the bulbs flash to full brightness on beats 1 and 3, then fade down before the next flash. Colors come from the album art and roll across the bulbs.
 - **Bar color shift**: every bulb changes palette color on each bar. With a ZHA group this takes one multicast frame per bar.
 - **Max reactive**: each bulb follows its own frequency band, bass on the first bulb. Colors rotate on the beat.
 - **Ambient palette**: album-art colors drift slowly. This works without beat analysis, and through the fallback player (see below).
