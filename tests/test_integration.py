@@ -147,6 +147,13 @@ async def test_full_show(hass: HomeAssistant, hass_storage: dict, sendspin_serve
         assert controller.bulbs[0].ieee == "00:17:88:01:0b:00:00:00" and controller.bulbs[0].endpoint == 11
 
         # Connected, but Music Assistant hasn't approved the new player yet.
+        # This test checks beat timing precisely, so use the deterministic effect.
+        await hass.services.async_call(
+            "select",
+            "select_option",
+            {"entity_id": "select.kitchen_lights_effect", "option": "beat_breathe"},
+            blocking=True,
+        )
         client_id = client_id_for(identity)
         await _until(lambda: hass.states.get(status).state == "awaiting_approval")
         await server.trust_unpaired(client_id)  # the one-click "Allow" in MA

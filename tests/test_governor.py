@@ -27,10 +27,27 @@ def test_newer_command_replaces_unsent_one() -> None:
     gov = Governor(rate_max=10, burst=0)
     gov.offer([cmd(0, 100, level=10)])
     gov.offer([cmd(0, 200, level=20)])
-    assert gov.stats.coalesced == 1
     gov._tokens = 1  # noqa: SLF001
     out = gov.take(0.0, 300)
-    assert [c.level for c in out] == [20]
+    assert [c.level for c in out] == [20]  # both due: only the latest matters
+    assert gov.stats.coalesced == 1
+
+
+def test_flash_and_its_fade_are_both_kept_when_not_yet_due() -> None:
+    gov = Governor(rate_max=20, burst=10)
+    gov.offer([cmd(0, 1_000_000, level=254), cmd(0, 1_090_000, level=40)])
+    first = gov.take(0.0, 1_000_000)
+    assert [c.level for c in first] == [254]
+    gov.on_result(0.05, 0.05, True)
+    second = gov.take(0.1, 1_090_000)
+    assert [c.level for c in second] == [40]
+    assert gov.stats.coalesced == 0
+
+
+def test_same_moment_replaces() -> None:
+    gov = Governor(rate_max=20, burst=10)
+    gov.offer([cmd(0, 500, level=40), cmd(0, 500, level=254)])
+    assert [c.level for c in gov.take(0.0, 500)] == [254]
 
 
 def test_stale_commands_dropped_and_future_ones_held() -> None:

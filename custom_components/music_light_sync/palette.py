@@ -17,17 +17,24 @@ _MIN_VALUE = 0.12
 _MIN_SAT = 0.18
 # Hues closer than this (0..1 wheel) count as the same color.
 _HUE_DEDUP = 0.06
-# Bulbs look washed out below this saturation; lift everything to at least it.
-_TARGET_MIN_SAT = 0.65
-# Spread used to invent neighbours when the source has too few distinct hues.
-_ANALOGOUS_STEP = 0.07
+# Minimum spacing between colors in the scheme, so every entry reads as distinct.
+_SCHEME_SPACING = 0.07
+# Album art rarely spans the wheel, so the scheme adds color-wheel harmonies of
+# the cover's dominant hue: complement, triad, split complements, then the gaps.
+_HARMONIES = (0.5, 1 / 3, -1 / 3, 0.5 + 0.09, 0.5 - 0.09, 1 / 6, -1 / 6, 0.25, -0.25, 0.09, -0.09, 0.42, -0.42)
 
+SCHEME_SIZE = 8
+
+# Full saturation around the wheel (no pastels: they read as white on a bulb).
 FALLBACK_PALETTE: tuple[RGB, ...] = (
-    (255, 64, 32),
-    (255, 0, 128),
-    (128, 0, 255),
-    (0, 96, 255),
-    (0, 200, 160),
+    (255, 0, 40),
+    (0, 120, 255),
+    (255, 170, 0),
+    (140, 0, 255),
+    (0, 255, 90),
+    (255, 0, 200),
+    (0, 230, 255),
+    (255, 80, 0),
 )
 
 
@@ -40,51 +47,52 @@ def _to_rgb(h: float, s: float, v: float) -> RGB:
     return (round(r * 255), round(g * 255), round(b * 255))
 
 
-def _hue_distance(a: float, b: float) -> float:
+def hue_of(rgb: RGB) -> float:
+    """Hue on a 0..1 wheel."""
+    return _to_hsv(rgb)[0]
+
+
+def hue_distance(a: float, b: float) -> float:
+    """Shortest distance between two hues on a 0..1 wheel."""
     d = abs(a - b) % 1.0
     return min(d, 1.0 - d)
 
 
-def build_palette(sources: Iterable[RGB | None], count: int) -> list[RGB]:
-    """Return ``count`` vivid colors derived from ``sources`` (most important first).
+def build_palette(sources: Iterable[RGB | None], count: int = SCHEME_SIZE) -> list[RGB]:
+    """Return ``count`` fully saturated colors anchored on ``sources`` (album art).
 
-    Near-black, near-white and grey sources are dropped, near-duplicate hues are
-    merged, saturation is lifted so bulbs do not look pastel, and analogous hues
-    are invented around the strongest color when the source is monochrome.
+    The cover's own hues come first, in order of importance; then harmonies of
+    the dominant one (complement, triad, split complements...) so the scheme
+    spans the color wheel instead of staying in the cover's corner of it.
+    Greys, near-black and near-white sources are ignored.
     """
     count = max(1, count)
-    hues: list[tuple[float, float]] = []  # (hue, saturation)
+    anchors: list[float] = []
     for rgb in sources:
         if rgb is None:
             continue
         h, s, v = _to_hsv(rgb)
         if v < _MIN_VALUE or s < _MIN_SAT:
             continue
-        if any(_hue_distance(h, existing) < _HUE_DEDUP for existing, _ in hues):
+        if any(hue_distance(h, existing) < _HUE_DEDUP for existing in anchors):
             continue
-        hues.append((h, s))
+        anchors.append(h)
 
-    if not hues:
+    if not anchors:
         return [FALLBACK_PALETTE[i % len(FALLBACK_PALETTE)] for i in range(count)]
 
-    # Invent analogous neighbours around the dominant hue until we have enough
-    # distinct hues to give adjacent bulbs visibly different colors.
-    base_h, base_s = hues[0]
-    step = 1
-    while len(hues) < min(count, 3):
-        sign = 1 if step % 2 else -1
-        candidate = (base_h + sign * _ANALOGOUS_STEP * ((step + 1) // 2)) % 1.0
-        if all(_hue_distance(candidate, h) >= _HUE_DEDUP * 0.8 for h, _ in hues):
-            hues.append((candidate, base_s))
-        step += 1
-        if step > 12:
+    base = anchors[0]
+    hues: list[float] = []
+    for candidate in [*anchors, *((base + offset) % 1.0 for offset in _HARMONIES)]:
+        if all(hue_distance(candidate, h) >= _SCHEME_SPACING for h in hues):
+            hues.append(candidate)
+        if len(hues) == count:
             break
-
-    vivid = [_to_rgb(h, max(s, _TARGET_MIN_SAT), 1.0) for h, s in hues]
+    vivid = [_to_rgb(h, 1.0, 1.0) for h in hues]
     return [vivid[i % len(vivid)] for i in range(count)]
 
 
-def palette_from_image(data: bytes, count: int, *, max_colors: int = 8) -> list[RGB]:
+def palette_from_image(data: bytes, count: int = SCHEME_SIZE, *, max_colors: int = 8) -> list[RGB]:
     """Extract a bulb palette from encoded image bytes (album art).
 
     Colors are ranked by how much of the image they cover, weighted by

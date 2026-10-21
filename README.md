@@ -16,7 +16,16 @@ Music Assistant already analyzes the audio it decodes. This integration connects
 
 ## What to expect
 
-- **Beat breathe** (default): the bulbs flash to full brightness on beats 1 and 3, then fade down before the next flash. Colors come from the album art and roll across the bulbs.
+- **Party (light jockey)** (default): runs the lights the way a person at a lighting desk would. The bulbs work in groups that share color, brightness and rhythm, and the look changes every 1–4 bars, always on a bar line and never the same look twice in a row. Looks include:
+  - **Unison:** all 5 hit together.
+  - **Call and response:** 2 bulbs answer 3.
+  - **Hold and pairs:** 1 bulb holds a color while 2 pairs trade beats.
+  - **Chase:** a hit runs around the room.
+  - **Build:** 2, then 3, 4 and 5 bulbs join in.
+  - **Swell, spotlight and sparkle.**
+
+  The music's energy picks the look: calm looks for quiet passages, chases and sparkles for loud ones, and a sudden jump in volume (a drop) hits all 5 at once. Each group gets colors far apart on the color wheel. They come from the album art plus its complementary and triadic hues, and they drift around the wheel during a song.
+- **Beat breathe:** the bulbs flash to full brightness on beats 1 and 3, then fade down before the next flash.
 - **Bar color shift**: every bulb changes palette color on each bar. With a ZHA group this takes one multicast frame per bar.
 - **Max reactive**: each bulb follows its own frequency band, bass on the first bulb. Colors rotate on the beat.
 - **Ambient palette**: album-art colors drift slowly. This works without beat analysis, and through the fallback player (see below).
@@ -63,7 +72,7 @@ If Home Assistant stops, the integration hands back first. If it crashes or lose
 | Option | Recommendation for this house |
 |---|---|
 | ZHA group | Optional. In ZHA, create a group with exactly the 5 kitchen bulbs and pick it here. Bar changes then hit all bulbs in one frame. The option is refused if the group has extra members. |
-| Zigbee frame budget | 12 frames/s to start. The governor backs off by itself when round trips get slow. |
+| Zigbee frame budget | 20 frames/s (the default). This trades a little Zigbee responsiveness during a show for livelier lights. The governor still backs off by itself if the mesh gets congested. |
 | Min. group spacing | 2 s. Multicast frames fill the coordinator's broadcast table, so don't go lower. |
 | Min/Max brightness | 15 % / 100 % |
 | Pause during a show | The kitchen occupancy/illuminance automations, and the *Adaptive Lighting: Kitchen Overhead* switch if you turn it back on. |
@@ -84,7 +93,7 @@ Pick **Beat breathe** and play something with a clear kick drum. Watch whether t
 ## Zigbee notes
 
 - Every command is one ZCL frame, either `Level Control / move_to_level` or `Color Control / move_to_color`, with the bulb doing the fade. Frames go directly to ZHA's zigpy cluster objects, so the event bus is not flooded with `call_service` events. If ZHA's internals change, it falls back to the `zha.issue_zigbee_*_command` services.
-- At most 4 frames are in flight at once, which leaves zigpy's other request slots free for your sensors.
+- At most 6 frames are in flight at once, out of zigpy's 8 request slots, so other devices are slowed during a show but never starved.
 - The bulbs report their new brightness and color back to ZHA, so the light entities update during a show. To keep those state changes out of the history database, exclude the 5 bulb entities from `recorder`.
 
 ## Limitations

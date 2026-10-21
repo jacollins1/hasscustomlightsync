@@ -39,7 +39,7 @@
         },
         "data_description": {
           "zha_group_id": "Optional. A ZHA group containing exactly these bulbs. One multicast frame then changes every bulb at once, but multicast floods the whole mesh, so it is rate limited separately.",
-          "rate_max": "Upper limit of unicast Zigbee frames per second for the show. The governor backs off automatically when the mesh gets slow. 12 is a safe start for 5 bulbs.",
+          "rate_max": "Upper limit of unicast Zigbee frames per second for the show. 20 trades a little Zigbee responsiveness for livelier lights; the governor still backs off automatically if the mesh gets congested.",
           "group_min_interval": "Multicast frames use the coordinator's small broadcast table. Keep this at 2 s or more.",
           "pause_entities": "Automations, switches (for example adaptive lighting) or input booleans that are turned off during a show and back on afterwards, if they were on.",
           "end_delay": "Pausing, skipping and short gaps between tracks do not restore the lights unless the silence lasts longer than this.",
@@ -62,6 +62,7 @@
       "effect": {
         "name": "Effect",
         "state": {
+          "party": "Party (light jockey)",
           "beat_breathe": "Beat breathe",
           "bar_color_shift": "Bar color shift",
           "max_reactive": "Max reactive",

@@ -52,8 +52,8 @@ class Governor:
         *,
         rate_max: float,
         rate_min: float = 2.0,
-        burst: int = 6,
-        max_inflight: int = 4,
+        burst: int = 12,
+        max_inflight: int = 6,
         group_min_interval_s: float = 2.0,
     ) -> None:
         self.rate_max = rate_max
@@ -70,7 +70,9 @@ class Governor:
         self._last_group_s: float | None = None
         self._last_increase_s = 0.0
         self._last_backoff_s = -BACKOFF_EVERY_S
-        self._pending: dict[tuple[int, str], Command] = {}
+        # Per bulb+attribute, every queued command in effect-time order. A bulb can
+        # legitimately have a flash now and its fade 90 ms later both queued.
+        self._pending: dict[tuple[int, str], list[Command]] = {}
         self._sent_at: deque[float] = deque(maxlen=400)
 
     def reset(self) -> None:
@@ -88,26 +90,54 @@ class Governor:
         return round(len(recent) / window_s, 2)
 
     def offer(self, commands: list[Command]) -> None:
-        """Queue commands; a newer one replaces an unsent one with the same key."""
+        """Queue commands; one for the same bulb, attribute and moment replaces the old one."""
         for cmd in commands:
-            if cmd.key in self._pending:
-                self.stats.coalesced += 1
-            self._pending[cmd.key] = cmd
+            queue = self._pending.setdefault(cmd.key, [])
+            for index, queued in enumerate(queue):
+                if queued.effect_us == cmd.effect_us:
+                    queue[index] = cmd
+                    self.stats.coalesced += 1
+                    break
+            else:
+                queue.append(cmd)
+                queue.sort(key=lambda c: c.effect_us)
+
+    @property
+    def pending_count(self) -> int:
+        """Commands queued but not yet sent."""
+        return sum(len(q) for q in self._pending.values())
 
     def take(self, now_s: float, horizon_us: int) -> list[Command]:
-        """Pop the commands that may be sent now, highest priority first."""
+        """Pop the commands that may be sent now, highest priority first.
+
+        Per bulb and attribute only the latest due command matters: if a flash
+        and its fade are both due (the flash could not go out in time), only
+        the fade is sent.
+        """
         if self._last_refill_s is not None:
             self._tokens = min(self.burst, self._tokens + (now_s - self._last_refill_s) * self.rate)
         self._last_refill_s = now_s
 
-        ready: list[Command] = []
-        for cmd in sorted(self._pending.values(), key=lambda c: (-c.priority, c.effect_us)):
-            if cmd.effect_us < horizon_us - STALE_US:
-                del self._pending[cmd.key]
-                self.stats.dropped_stale += 1
+        candidates: list[Command] = []
+        for key in list(self._pending):
+            queue = self._pending[key]
+            due = [c for c in queue if c.effect_us <= horizon_us]
+            if not due:
                 continue
-            if cmd.effect_us > horizon_us:
-                continue  # not due yet
+            latest = due[-1]
+            for older in due[:-1]:
+                queue.remove(older)
+                self.stats.coalesced += 1
+            if latest.effect_us < horizon_us - STALE_US:
+                queue.remove(latest)
+                self.stats.dropped_stale += 1
+            else:
+                candidates.append(latest)
+            if not queue:
+                del self._pending[key]
+
+        ready: list[Command] = []
+        for cmd in sorted(candidates, key=lambda c: (-c.priority, c.effect_us)):
             if self.inflight + len(ready) >= self.max_inflight or self._tokens < 1:
                 break
             if cmd.target == GROUP:
@@ -115,7 +145,11 @@ class Governor:
                     continue
                 self._last_group_s = now_s
             self._tokens -= 1
-            del self._pending[cmd.key]
+            queue = self._pending.get(cmd.key, [])
+            if cmd in queue:
+                queue.remove(cmd)
+                if not queue:
+                    self._pending.pop(cmd.key, None)
             ready.append(cmd)
         for _ in ready:
             self._sent_at.append(now_s)

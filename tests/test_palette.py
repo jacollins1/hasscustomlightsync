@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import colorsys
 import io
+import itertools
 
 from PIL import Image
 
@@ -19,7 +20,18 @@ def hue(rgb: tuple[int, int, int]) -> float:
 
 
 def test_greys_and_blacks_fall_back() -> None:
-    assert build_palette([(0, 0, 0), (128, 128, 128), (250, 250, 250), None], 5) == list(FALLBACK_PALETTE)
+    assert build_palette([(0, 0, 0), (128, 128, 128), (250, 250, 250), None], 5) == list(FALLBACK_PALETTE[:5])
+
+
+def test_red_cover_still_spans_the_wheel() -> None:
+    """Jon's complaint: a red/pink cover gave only reds, pinks, purples and whites."""
+    pal = build_palette([(220, 30, 60), (200, 40, 120), (240, 220, 225)])
+    assert len(pal) == 8 and len(set(pal)) == 8
+    hues = sorted(hue(c) for c in pal)
+    gaps = [b - a for a, b in itertools.pairwise(hues)] + [1 - hues[-1] + hues[0]]
+    assert max(gaps) < 0.25  # no quarter of the wheel left unused
+    assert any(abs(hue(c) - 0.5) < 0.12 for c in pal)  # cyan/teal, the complement, is in
+    assert all(colorsys.rgb_to_hsv(*(x / 255 for x in c))[1] > 0.99 for c in pal)  # no pastels
 
 
 def test_monochrome_cover_gets_analogous_neighbours() -> None:

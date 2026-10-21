@@ -22,18 +22,19 @@ from collections import deque
 from dataclasses import dataclass
 from enum import StrEnum
 
+from .choreo import BeatInfo, Choreographer
+from .model import (  # noqa: F401 - re-exported for callers and tests
+    GROUP,
+    PRIO_AMBIENT,
+    PRIO_BEAT,
+    PRIO_COLOR,
+    PRIO_LEVEL,
+    STALE_US,
+    Command,
+)
+from .model import ds as _ds
 from .palette import FALLBACK_PALETTE, RGB
 
-GROUP = -1  # Command.target for a single Zigbee group (multicast) frame
-
-PRIO_AMBIENT = 0
-PRIO_COLOR = 1
-PRIO_LEVEL = 2
-PRIO_BEAT = 3
-
-# A command whose effect time is this far in the past when it could be sent is
-# no longer worth sending: the moment has gone.
-STALE_US = 150_000
 # Beats/peaks older than this no longer count as "music has a pulse".
 PULSE_TIMEOUT_US = 4_000_000
 # Pseudo-beats derived from onsets never come closer together than this.
@@ -54,33 +55,15 @@ DB_UNIT = 65535 / 60
 AGC_RANGE = 24 * DB_UNIT  # show the top 24 dB of the recent dynamic range
 AGC_DECAY_PER_S = 3 * DB_UNIT  # running max sinks 3 dB/s after a loud passage
 
-MAX_TRANSITION_DS = 600
-
 
 class Mode(StrEnum):
     """Effect modes exposed to the user."""
 
+    PARTY = "party"
     BREATHE = "beat_breathe"
     BAR = "bar_color_shift"
     REACTIVE = "max_reactive"
     AMBIENT = "ambient_palette"
-
-
-@dataclass(slots=True)
-class Command:
-    """One Zigbee frame: a level OR a color change for a bulb or the group."""
-
-    effect_us: int
-    target: int
-    level: int | None
-    rgb: RGB | None
-    transition_ds: int
-    priority: int
-
-    @property
-    def key(self) -> tuple[int, str]:
-        """Coalescing key: a newer command with the same key supersedes this one."""
-        return (self.target, "level" if self.level is not None else "color")
 
 
 @dataclass(slots=True)
@@ -114,15 +97,12 @@ class _Agc:
         return min(1.0, max(0.0, (value - (self._peak - AGC_RANGE)) / AGC_RANGE))
 
 
-def _ds(us: float) -> int:
-    return max(0, min(MAX_TRANSITION_DS, round(us / 100_000)))
-
-
 class EffectEngine:
     """Turns beats, onsets, loudness and spectrum into light commands."""
 
-    def __init__(self, settings: EngineSettings, mode: Mode = Mode.BREATHE) -> None:
+    def __init__(self, settings: EngineSettings, mode: Mode = Mode.PARTY, seed: int | None = None) -> None:
         self.settings = settings
+        self.choreo = Choreographer(settings.bulbs, settings.min_level, settings.max_level, seed=seed)
         self.mode = mode
         self.budget_per_s = 10.0
         self.tracks_downbeats = False
@@ -146,6 +126,7 @@ class EffectEngine:
         self._spectrum.clear()
         self._beat_hist.clear()
         self._band_agc = [_Agc() for _ in range(self.settings.bulbs)]
+        self.choreo.reset()
         self._beat_index = 0
         self._beat_in_bar = 0
         self._last_pulse_us: int | None = None
@@ -173,6 +154,7 @@ class EffectEngine:
         """Replace the color palette (one entry per bulb or more)."""
         if colors:
             self._palette = list(colors)
+            self.choreo.set_palette(colors)
 
     @property
     def palette(self) -> list[RGB]:
@@ -298,7 +280,9 @@ class EffectEngine:
         if ts < horizon - STALE_US:
             return  # counted for bar position, but too late to show
         bar_start = self._beat_in_bar == 0
-        if self.mode is Mode.BREATHE:
+        if self.mode is Mode.PARTY:
+            self._party(ts, bar_start, out)
+        elif self.mode is Mode.BREATHE:
             self._breathe(ts, bar_start, out)
         elif self.mode is Mode.BAR:
             self._bar(ts, bar_start, out)
@@ -337,6 +321,23 @@ class EffectEngine:
                 return next_ts, position == 0
         meter = self._bar_len if self.tracks_downbeats else 4
         return ts + self.beat_interval_us * divisor, (self._beat_in_bar + divisor) % meter == 0
+
+    def _party(self, ts: int, bar_start: bool, out: list[Command]) -> None:
+        """Hand the beat to the light jockey."""
+        interval = self.beat_interval_us
+        next_ts, next_is_bar = self._next_pulse(ts, 1)
+        values = [v for t, v in self._loudness if ts <= t <= next_ts]
+        loudness_db = statistics.fmean(values) / DB_UNIT - 60 if values else None
+        beat = BeatInfo(
+            ts=ts,
+            interval=max(MIN_BEAT_US, min(MAX_BEAT_US, next_ts - ts)) if next_ts > ts else interval,
+            position=self._beat_in_bar,
+            bar_len=self._bar_len if self.tracks_downbeats else 4,
+            bar_start=bar_start,
+            next_is_bar=next_is_bar,
+            loudness_db=loudness_db,
+        )
+        out.extend(self.choreo.on_beat(beat))
 
     def _breathe(self, ts: int, bar_start: bool, out: list[Command]) -> None:
         """Flash on the beat, release before the next one.

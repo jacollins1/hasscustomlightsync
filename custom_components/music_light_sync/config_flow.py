@@ -186,7 +186,7 @@ class MusicLightSyncOptionsFlow(OptionsFlow):
                 selector.SelectSelectorConfig(options=_zha_groups(self.hass), mode=selector.SelectSelectorMode.DROPDOWN)
             ),
             vol.Required(CONF_RATE_MAX, default=opts.get(CONF_RATE_MAX, DEFAULT_RATE_MAX)): selector.NumberSelector(
-                selector.NumberSelectorConfig(min=2, max=25, step=0.5, unit_of_measurement="frames/s")
+                selector.NumberSelectorConfig(min=2, max=40, step=0.5, unit_of_measurement="frames/s")
             ),
             vol.Required(
                 CONF_GROUP_MIN_INTERVAL, default=opts.get(CONF_GROUP_MIN_INTERVAL, DEFAULT_GROUP_MIN_INTERVAL)

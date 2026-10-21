@@ -155,7 +155,7 @@ class LightSyncController:
 
         # Restored by the entities on startup.
         self.armed = True
-        self.mode = Mode.BREATHE
+        self.mode = Mode.PARTY
         self.user_offset_ms = 0.0
 
         self.bulbs: list[Bulb] = []
@@ -422,7 +422,7 @@ class LightSyncController:
         if color is None or self.engine is None or self._stopping:
             return
         sources = [color.primary, color.accent, color.on_dark, color.background_dark, color.on_light]
-        self.engine.set_palette(build_palette(sources, len(self.bulbs)))
+        self.engine.set_palette(build_palette(sources))
         self._notify()
 
     # ------------------------------------------------------------- fallback
@@ -471,7 +471,7 @@ class LightSyncController:
         if image is None:
             return
         try:
-            palette = await self.hass.async_add_executor_job(palette_from_image, image, len(self.bulbs))
+            palette = await self.hass.async_add_executor_job(palette_from_image, image)
         except Exception:  # noqa: BLE001 - a bad image must not stop the show
             _LOGGER.debug("Could not extract palette from album art", exc_info=True)
             return
