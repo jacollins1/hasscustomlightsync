@@ -239,3 +239,12 @@ async def test_unavailable_bulb_stays_recorded_and_is_retried(hass: HomeAssistan
     assert [c.data["entity_id"] for c in restored][-1] == lights[1]
     assert key not in hass_storage
     assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_group_helper_restored_unavailable_at_boot_retries(hass: HomeAssistant) -> None:
+    """Seen live: at boot the group helper exists as 'unavailable' with no member list."""
+    er.async_get(hass).async_get_or_create("light", "group", "kitchen2", suggested_object_id="kitchen_overhead")
+    hass.states.async_set("light.kitchen_overhead", "unavailable", {"restored": True})
+    entry = _entry(hass, ["light.kitchen_overhead"], [])
+    await hass.config_entries.async_setup(entry.entry_id)
+    assert entry.state is ConfigEntryState.SETUP_RETRY

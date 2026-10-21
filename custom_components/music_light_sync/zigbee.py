@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import CoreState
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
@@ -75,6 +76,14 @@ def expand_lights(hass: HomeAssistant, entity_ids: list[str]) -> list[str]:
         members = state.attributes.get("entity_id") if state else None
         if (entry is None or entry.platform != "zha") and isinstance(members, list | tuple):
             result.extend(expand_lights(hass, list(members)))
+        elif (entry is not None and entry.platform == "group") or (
+            (entry is None or entry.platform != "zha")
+            and state is not None
+            and state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+        ):
+            # A group helper reports its members only once it has loaded; at boot
+            # it is a restored "unavailable" placeholder without them.
+            raise BulbsNotReady(f"{entity_id} has not loaded its members yet")
         else:
             result.append(entity_id)
     return list(dict.fromkeys(result))

@@ -92,9 +92,11 @@ async def test_options_reject_group_with_extra_members(hass: HomeAssistant) -> N
     def member(ieee: str) -> SimpleNamespace:
         return SimpleNamespace(device=SimpleNamespace(ieee=ieee), endpoint_id=11)
 
-    groups = {
-        2: SimpleNamespace(name="Kitchen", members=[member("00:17:88:01:0b:00:00:01")]),
-        3: SimpleNamespace(
+    import zigpy.types as zt
+
+    groups = {  # keyed like real ZHA: zigpy Group, whose str() is "0x0002"
+        zt.Group(2): SimpleNamespace(name="Kitchen", members=[member("00:17:88:01:0b:00:00:01")]),
+        zt.Group(3): SimpleNamespace(
             name="Downstairs", members=[member("00:17:88:01:0b:00:00:01"), member("aa:bb:cc:dd:ee:ff:00:11")]
         ),
     }

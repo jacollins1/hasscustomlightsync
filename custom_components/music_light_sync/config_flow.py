@@ -128,7 +128,9 @@ def _zha_groups(hass: HomeAssistant) -> list[selector.SelectOptionDict]:
     except Exception:  # noqa: BLE001 - ZHA not loaded: offer no groups
         return options
     for group_id, group in sorted(groups.items()):
-        options.append(selector.SelectOptionDict(value=str(group_id), label=f"{group.name} (0x{group_id:04x})"))
+        # ZHA keys groups by zigpy's Group type, whose str() is hex ("0x0003").
+        gid = int(group_id)
+        options.append(selector.SelectOptionDict(value=str(gid), label=f"{group.name} (0x{gid:04x})"))
     return options
 
 
@@ -167,7 +169,7 @@ class MusicLightSyncOptionsFlow(OptionsFlow):
         if user_input is not None:
             data = dict(user_input)
             group = data.pop(CONF_ZHA_GROUP_ID, NO_GROUP)
-            data[CONF_ZHA_GROUP_ID] = None if group == NO_GROUP else int(group)
+            data[CONF_ZHA_GROUP_ID] = None if group == NO_GROUP else int(str(group), 0)
             if data[CONF_MIN_BRIGHTNESS] >= data[CONF_MAX_BRIGHTNESS]:
                 data[CONF_MIN_BRIGHTNESS] = max(1, data[CONF_MAX_BRIGHTNESS] - 10)
             if data[CONF_ZHA_GROUP_ID] is not None and (
