@@ -37,6 +37,7 @@ from .palette import FALLBACK_PALETTE, RGB
 
 # Beats/peaks older than this no longer count as "music has a pulse".
 PULSE_TIMEOUT_US = 4_000_000
+PARTY_PREP_US = 250_000  # party plans beats this far ahead of their send time
 # Pseudo-beats derived from onsets never come closer together than this.
 MIN_PSEUDO_BEAT_US = 300_000
 PEAK_MIN_STRENGTH = 110  # of 255
@@ -78,6 +79,7 @@ class EngineSettings:
     bar_transition_ds: int = 3
     ambient_period_us: int = 10_000_000
     color_every_bars: int = 2
+    layout: list[tuple[float, float]] | None = None  # bulb positions, 0..1, in bulb order
 
 
 class _Agc:
@@ -102,9 +104,12 @@ class EffectEngine:
 
     def __init__(self, settings: EngineSettings, mode: Mode = Mode.PARTY, seed: int | None = None) -> None:
         self.settings = settings
-        self.choreo = Choreographer(settings.bulbs, settings.min_level, settings.max_level, seed=seed)
+        self.choreo = Choreographer(
+            settings.bulbs, settings.min_level, settings.max_level, seed=seed, layout=settings.layout
+        )
         self.mode = mode
         self.budget_per_s = 10.0
+        self._intensity = 1.0
         self.tracks_downbeats = False
         self._palette: list[RGB] = list(FALLBACK_PALETTE)
         self._beats: deque[tuple[int, bool]] = deque()
@@ -233,6 +238,20 @@ class EffectEngine:
 
     # ------------------------------------------------------------------ output
 
+    @property
+    def intensity(self) -> float:
+        """0.1..1: how far above the floor the effects may go (the Intensity control)."""
+        return self._intensity
+
+    @intensity.setter
+    def intensity(self, value: float) -> None:
+        self._intensity = max(0.1, min(1.0, value))
+        self.choreo.intensity = self._intensity
+
+    def _top(self) -> int:
+        s = self.settings
+        return round(s.min_level + (s.max_level - s.min_level) * self._intensity)
+
     def step(self, now_us: int, lead_us: int) -> list[Command]:
         """Return the commands that must be sent now to land on time."""
         horizon = now_us + lead_us
@@ -256,7 +275,11 @@ class EffectEngine:
         handler sees the bar position and the upcoming-beat queue as of that
         pulse, even when one tick pops several.
         """
-        while self._beats and self._beats[0][0] <= horizon:
+        # Party plans each beat a little ahead so a look change can recolor the
+        # bulbs before the hit instead of in the same instant (which would put
+        # 10 frames on the air at once at a drop).
+        reach = horizon + (PARTY_PREP_US if self.mode is Mode.PARTY else 0)
+        while self._beats and self._beats[0][0] <= reach:
             ts, downbeat = self._beats.popleft()
             self._beat_hist.append(ts)
             self._last_real_beat_us = ts
@@ -336,8 +359,30 @@ class EffectEngine:
             bar_start=bar_start,
             next_is_bar=next_is_bar,
             loudness_db=loudness_db,
+            budget_per_s=self.budget_per_s,
         )
-        out.extend(self.choreo.on_beat(beat))
+        out.extend(self._multicast(self.choreo.on_beat(beat)))
+
+    def _multicast(self, commands: list[Command]) -> list[Command]:
+        """With a ZHA group, send a whole-room change (same value for every
+        bulb at the same moment, e.g. the drop's white flash) as one frame."""
+        s = self.settings
+        if not s.has_group or s.bulbs < 2:
+            return commands
+        buckets: dict[tuple, list[Command]] = {}
+        for cmd in commands:
+            buckets.setdefault((cmd.effect_us, cmd.level, cmd.rgb, cmd.transition_ds, cmd.priority), []).append(cmd)
+        result: list[Command] = []
+        for (effect_us, level, rgb, transition_ds, priority), cmds in buckets.items():
+            whole_room = len({c.target for c in cmds}) == s.bulbs
+            # Margin over the governor's own spacing so it never holds a group frame back.
+            spaced = self._last_group_us is None or effect_us - self._last_group_us >= s.group_min_interval_us + 500_000
+            if whole_room and spaced:
+                self._last_group_us = effect_us
+                result.append(Command(effect_us, GROUP, level, rgb, transition_ds, priority))
+            else:
+                result.extend(cmds)
+        return result
 
     def _breathe(self, ts: int, bar_start: bool, out: list[Command]) -> None:
         """Flash on the beat, release before the next one.
@@ -367,8 +412,8 @@ class EffectEngine:
         if flash:
             loud = self._loud_norm(ts, ts + span)
             depth = 0.55 + 0.45 * (loud if loud is not None else 1.0)
-            level = round(s.min_level + (s.max_level - s.min_level) * depth)
-            transition = 0
+            level = round(s.min_level + (self._top() - s.min_level) * depth)
+            transition = 0 if self.intensity >= 0.6 else 2  # no hard flashes when dialed down
         else:
             level = s.min_level
             transition = _ds(span * 0.9)
@@ -431,7 +476,7 @@ class EffectEngine:
             if energy is None:
                 energy = self._loud_norm(start, start + per_bulb)
             if energy is not None:
-                level = round(s.min_level + (s.max_level - s.min_level) * energy**0.8)
+                level = round(s.min_level + (self._top() - s.min_level) * energy**0.8)
                 last = self._last_level[bulb]
                 if last is None or abs(level - last) >= 4:
                     out.append(Command(start, bulb, level, None, _ds(per_bulb), PRIO_LEVEL))

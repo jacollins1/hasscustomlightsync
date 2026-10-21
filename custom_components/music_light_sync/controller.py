@@ -33,6 +33,7 @@ from homeassistant.core import Event, EventStateChangedData, HomeAssistant, Stat
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_AMBIENT_PERIOD,
@@ -41,6 +42,7 @@ from .const import (
     CONF_GROUP_MIN_INTERVAL,
     CONF_HOST,
     CONF_IDENTITY,
+    CONF_LAYOUT,
     CONF_LIGHTS,
     CONF_MAX_BRIGHTNESS,
     CONF_MIN_BRIGHTNESS,
@@ -61,7 +63,7 @@ from .const import (
     TICK_S,
     VERSION,
 )
-from .engine import Command, EffectEngine, EngineSettings, Mode
+from .engine import GROUP, Command, EffectEngine, EngineSettings, Mode
 from .governor import Governor
 from .palette import build_palette, palette_from_image
 from .sendspin_link import LinkState, SendspinLink
@@ -76,6 +78,8 @@ _LOGGER = logging.getLogger(__name__)
 
 FALLBACK_GRACE_S = 4.0  # let a real Sendspin stream win when both start together
 LOOP_ERROR_LOG_EVERY_S = 30.0
+BULB_FAILS_TO_REST = 4  # consecutive failed frames before a bulb is rested
+BULB_REST_S = 60
 HANDBACK_RETRY_S = 60.0
 HANDBACK_MAX_RETRIES = 30  # half an hour of retries, then the record waits for the next show
 _LIGHT_ATTRS = ("brightness", "color_mode", "color_temp_kelvin", "xy_color", "hs_color", "effect")
@@ -97,6 +101,27 @@ class Session(StrEnum):
 
     STREAM = "stream"
     FALLBACK = "fallback"
+
+
+def parse_layout(text: str | None, count: int) -> list[tuple[float, float]] | None:
+    """Bulb positions from "x, y" lines (0-100, bulb order). None if absent or invalid."""
+    if not text or not text.strip():
+        return None
+    points: list[tuple[float, float]] = []
+    for line in text.replace(";", "\n").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if ":" in line:  # allow "1: 43, 13"
+            line = line.split(":", 1)[1]
+        parts = [p for p in line.replace(" ", ",").split(",") if p]
+        if len(parts) != 2:
+            raise ValueError(f"'{line}' is not 'x, y'")
+        x, y = float(parts[0]), float(parts[1])
+        points.append((x / 100, y / 100))
+    if len(points) != count:
+        raise ValueError(f"{len(points)} positions for {count} bulbs")
+    return points
 
 
 def _pct_to_level(pct: float) -> int:
@@ -148,6 +173,9 @@ class LightSyncController:
         self.max_level = _pct_to_level(opts.get(CONF_MAX_BRIGHTNESS, DEFAULT_MAX_BRIGHTNESS))
         self._group_min_interval_s = float(opts.get(CONF_GROUP_MIN_INTERVAL, DEFAULT_GROUP_MIN_INTERVAL))
         self._ambient_period_s = float(opts.get(CONF_AMBIENT_PERIOD, DEFAULT_AMBIENT_PERIOD))
+        self._layout_text: str | None = opts.get(CONF_LAYOUT)
+        self._track_key: object = None
+        self._context_at = 0.0
         self.governor = Governor(
             rate_max=float(opts.get(CONF_RATE_MAX, DEFAULT_RATE_MAX)),
             group_min_interval_s=self._group_min_interval_s,
@@ -157,6 +185,7 @@ class LightSyncController:
         self.armed = True
         self.mode = Mode.PARTY
         self.user_offset_ms = 0.0
+        self.intensity = 1.0
 
         self.bulbs: list[Bulb] = []
         self.output: ZhaOutput | None = None
@@ -192,6 +221,11 @@ class LightSyncController:
         self._session_lock = asyncio.Lock()
         self._fallback_art: str | None = None
         self._last_loop_error_s = 0.0
+        # A bulb that keeps failing (e.g. switched off at the wall) is rested
+        # instead of retried on every beat: each failed frame costs seconds of
+        # retries on the mesh that the rest of the house shares.
+        self._fail_streak: dict[int, int] = {}
+        self._resting_until: dict[int, float] = {}
 
     # ---------------------------------------------------------------- set-up
 
@@ -199,8 +233,14 @@ class LightSyncController:
         """Resolve bulbs and build the engines (raises BulbResolveError / BulbsNotReady)."""
         self.bulbs = resolve_bulbs(self.hass, self.light_ids)
         self.output = ZhaOutput(self.hass, self.bulbs, self.group_id)
+        try:
+            layout = parse_layout(self._layout_text, len(self.bulbs))
+        except ValueError as err:
+            _LOGGER.warning("%s: ignoring bulb layout (%s); using configured order", self.name, err)
+            layout = None
         settings = EngineSettings(
             bulbs=len(self.bulbs),
+            layout=layout,
             min_level=self.min_level,
             max_level=self.max_level,
             has_group=self.group_id is not None,
@@ -208,6 +248,7 @@ class LightSyncController:
             ambient_period_us=int(self._ambient_period_s * 1e6),
         )
         self.engine = EffectEngine(settings, self.mode)
+        self.engine.intensity = self.intensity
         self.engine.budget_per_s = self.governor.rate
         self.fallback_engine = EffectEngine(settings, Mode.AMBIENT)
 
@@ -322,6 +363,9 @@ class LightSyncController:
             "frames_dropped_late": gov.stats.dropped_stale,
             "frames_coalesced": gov.stats.coalesced,
             "frame_errors": gov.stats.errors,
+            "resting_bulbs": sorted(
+                self.bulbs[t].entity_id for t, until in self._resting_until.items() if until > time.monotonic()
+            ),
             "palette": ["#{:02x}{:02x}{:02x}".format(*c) for c in engine.palette] if engine else [],
             "time_synced": self.link.time_synced,
             "sendspin_client_id": self.link.client_id,
@@ -345,6 +389,13 @@ class LightSyncController:
         self.mode = mode
         if self.engine:
             self.engine.set_mode(mode)
+        self._notify()
+
+    def set_intensity(self, percent: float) -> None:
+        """Intensity number: how hard the lights hit (100 % = full contrast)."""
+        self.intensity = max(0.1, min(1.0, percent / 100))
+        if self.engine:
+            self.engine.intensity = self.intensity
         self._notify()
 
     def set_user_offset(self, offset_ms: float) -> None:
@@ -701,10 +752,16 @@ class LightSyncController:
         while True:
             now_s = time.monotonic()
             try:
+                if now_s - self._context_at >= 1.0:
+                    self._context_at = now_s
+                    self._update_music_context()
                 if (clock := self._clock()) is not None:
                     engine, now_us, lead_us = clock
                     engine.budget_per_s = self.governor.rate
-                    self.governor.offer(engine.step(now_us, lead_us))
+                    commands = engine.step(now_us, lead_us)
+                    if self._resting_until:
+                        commands = [c for c in commands if self._resting_until.get(c.target, 0.0) <= now_s]
+                    self.governor.offer(commands)
                     for cmd in self.governor.take(now_s, now_us + lead_us):
                         task = self.hass.async_create_task(self._async_send(cmd), eager_start=False)
                         self._send_tasks.add(task)
@@ -718,6 +775,35 @@ class LightSyncController:
                 self._notify()
             await asyncio.sleep(TICK_S)
 
+    @callback
+    def _update_music_context(self) -> None:
+        """Volume, time left in the track and track changes, from the music player."""
+        if self.engine is None or not self.fallback_player:
+            return
+        state = self.hass.states.get(self.fallback_player)
+        choreo = self.engine.choreo
+        if state is None:
+            choreo.volume = choreo.track_remaining_s = None
+            return
+        attrs = state.attributes
+        volume = attrs.get("volume_level")
+        choreo.volume = None if volume is None or attrs.get("is_volume_muted") else float(volume)
+        duration, position = attrs.get("media_duration"), attrs.get("media_position")
+        updated = attrs.get("media_position_updated_at")
+        remaining = None
+        if state.state == STATE_PLAYING and duration and position is not None:
+            elapsed = float(position)
+            if updated is not None:
+                with contextlib.suppress(AttributeError, TypeError):
+                    elapsed += (dt_util.utcnow() - updated).total_seconds()
+            remaining = float(duration) - elapsed
+        choreo.track_remaining_s = remaining
+        track = (attrs.get("media_content_id"), attrs.get("media_title"))
+        if track != self._track_key:
+            if self._track_key is not None and any(track):
+                choreo.reset()  # a new song tells its own story
+            self._track_key = track
+
     async def _async_send(self, cmd: Command) -> None:
         assert self.output is not None
         try:
@@ -726,9 +812,24 @@ class LightSyncController:
             self.governor.on_result(time.monotonic(), None, True)
             raise
         except Exception as err:  # noqa: BLE001 - count it, back off, keep going
-            self.governor.on_result(time.monotonic(), None, False)
+            now_s = time.monotonic()
+            self.governor.on_result(now_s, None, False)
             _LOGGER.debug("Zigbee frame to %s failed: %s", cmd.target, err)
+            if cmd.target != GROUP:
+                streak = self._fail_streak.get(cmd.target, 0) + 1
+                self._fail_streak[cmd.target] = streak
+                if streak >= BULB_FAILS_TO_REST:
+                    self._fail_streak[cmd.target] = 0
+                    self._resting_until[cmd.target] = now_s + BULB_REST_S
+                    _LOGGER.info(
+                        "%s: %s is not answering; resting it for %d s",
+                        self.name,
+                        self.bulbs[cmd.target].entity_id,
+                        BULB_REST_S,
+                    )
             if self.governor.stats.errors in (10, 100, 1000):
                 _LOGGER.warning("%s: %d Zigbee frames failed so far", self.name, self.governor.stats.errors)
             return
         self.governor.on_result(time.monotonic(), rtt, True)
+        self._fail_streak.pop(cmd.target, None)
+        self._resting_until.pop(cmd.target, None)

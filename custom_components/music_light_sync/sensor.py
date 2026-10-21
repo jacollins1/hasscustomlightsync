@@ -43,6 +43,7 @@ class StatusSensor(LightSyncEntity, SensorEntity):
             "frames_dropped_late",
             "frames_coalesced",
             "frame_errors",
+            "resting_bulbs",
             "palette",
             "time_synced",
             "last_error",

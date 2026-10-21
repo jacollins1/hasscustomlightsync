@@ -110,6 +110,9 @@ class Governor:
     def take(self, now_s: float, horizon_us: int) -> list[Command]:
         """Pop the commands that may be sent now, highest priority first.
 
+        At equal priority and moment a color goes before a level, so a bulb
+        never flashes up in its old color.
+
         Per bulb and attribute only the latest due command matters: if a flash
         and its fade are both due (the flash could not go out in time), only
         the fade is sent.
@@ -137,7 +140,7 @@ class Governor:
                 del self._pending[key]
 
         ready: list[Command] = []
-        for cmd in sorted(candidates, key=lambda c: (-c.priority, c.effect_us)):
+        for cmd in sorted(candidates, key=lambda c: (-c.priority, c.effect_us, c.rgb is None)):
             if self.inflight + len(ready) >= self.max_inflight or self._tokens < 1:
                 break
             if cmd.target == GROUP:

@@ -19,6 +19,7 @@ from .const import (
     CONF_GROUP_MIN_INTERVAL,
     CONF_HOST,
     CONF_IDENTITY,
+    CONF_LAYOUT,
     CONF_LIGHTS,
     CONF_MAX_BRIGHTNESS,
     CONF_MIN_BRIGHTNESS,
@@ -160,6 +161,23 @@ def _group_mismatch(hass: HomeAssistant, group_id: int, light_ids: list[str]) ->
     return None if members == bulbs else "members"
 
 
+def _layout_error(hass: HomeAssistant, text: str | None, light_ids: list[str]) -> str | None:
+    """Validate the bulb layout text against the number of configured bulbs."""
+    if not text or not text.strip():
+        return None
+    from .controller import parse_layout  # noqa: PLC0415
+
+    try:
+        count = len(resolve_bulbs(hass, light_ids))
+    except BulbResolveError:
+        return None
+    try:
+        parse_layout(text, count)
+    except ValueError:
+        return "layout_invalid"
+    return None
+
+
 class MusicLightSyncOptionsFlow(OptionsFlow):
     """Tuning and integration with the rest of the house."""
 
@@ -172,7 +190,10 @@ class MusicLightSyncOptionsFlow(OptionsFlow):
             data[CONF_ZHA_GROUP_ID] = None if group == NO_GROUP else int(str(group), 0)
             if data[CONF_MIN_BRIGHTNESS] >= data[CONF_MAX_BRIGHTNESS]:
                 data[CONF_MIN_BRIGHTNESS] = max(1, data[CONF_MAX_BRIGHTNESS] - 10)
-            if data[CONF_ZHA_GROUP_ID] is not None and (
+            layout_error = _layout_error(self.hass, data.get(CONF_LAYOUT), self.config_entry.data[CONF_LIGHTS])
+            if layout_error:
+                errors[CONF_LAYOUT] = layout_error
+            elif data[CONF_ZHA_GROUP_ID] is not None and (
                 problem := _group_mismatch(self.hass, data[CONF_ZHA_GROUP_ID], self.config_entry.data[CONF_LIGHTS])
             ):
                 errors[CONF_ZHA_GROUP_ID] = f"group_{problem}"
@@ -207,6 +228,10 @@ class MusicLightSyncOptionsFlow(OptionsFlow):
                 CONF_AMBIENT_PERIOD, default=opts.get(CONF_AMBIENT_PERIOD, DEFAULT_AMBIENT_PERIOD)
             ): selector.NumberSelector(selector.NumberSelectorConfig(min=3, max=120, step=1, unit_of_measurement="s")),
         }
+        layout = opts.get(CONF_LAYOUT)
+        fields[vol.Optional(CONF_LAYOUT, description={"suggested_value": layout} if layout else None)] = (
+            selector.TextSelector(selector.TextSelectorConfig(multiline=True))
+        )
         player = opts.get(CONF_FALLBACK_PLAYER)
         fields[vol.Optional(CONF_FALLBACK_PLAYER, description={"suggested_value": player} if player else None)] = (
             selector.EntitySelector(selector.EntitySelectorConfig(domain="media_player"))

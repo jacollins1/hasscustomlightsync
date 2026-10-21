@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Final
 
 DOMAIN: Final = "music_light_sync"
-VERSION: Final = "0.2.0"
+VERSION: Final = "0.3.0"
 
 # Config entry data
 CONF_HOST: Final = "host"
@@ -24,9 +24,10 @@ CONF_FALLBACK_PLAYER: Final = "fallback_player"
 CONF_PAUSE_ENTITIES: Final = "pause_entities"
 CONF_END_DELAY: Final = "end_delay"
 CONF_AMBIENT_PERIOD: Final = "ambient_period"
+CONF_LAYOUT: Final = "layout"
 
 DEFAULT_PORT: Final = 8927
-DEFAULT_NAME: Final = "Kitchen Lights"
+DEFAULT_NAME: Final = "Music Lights"
 DEFAULT_RATE_MAX: Final = 20.0
 DEFAULT_GROUP_MIN_INTERVAL: Final = 2.0
 DEFAULT_MIN_BRIGHTNESS: Final = 15  # percent

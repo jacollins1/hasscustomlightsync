@@ -145,6 +145,14 @@ async def test_full_show(hass: HomeAssistant, hass_storage: dict, sendspin_serve
         controller = entry.runtime_data
         assert [b.entity_id for b in controller.bulbs] == lights
         assert controller.bulbs[0].ieee == "00:17:88:01:0b:00:00:00" and controller.bulbs[0].endpoint == 11
+        assert hass.states.get("number.kitchen_lights_intensity").state == "100"
+        await hass.services.async_call(
+            "number", "set_value", {"entity_id": "number.kitchen_lights_intensity", "value": 50}, blocking=True
+        )
+        assert controller.intensity == 0.5
+        await hass.services.async_call(
+            "number", "set_value", {"entity_id": "number.kitchen_lights_intensity", "value": 100}, blocking=True
+        )
 
         # Connected, but Music Assistant hasn't approved the new player yet.
         # This test checks beat timing precisely, so use the deterministic effect.
@@ -275,6 +283,76 @@ async def test_disarm_ends_show_immediately(hass: HomeAssistant, sendspin_server
         await hass.services.async_call("switch", "turn_off", {"entity_id": "switch.kitchen_lights_sync"}, blocking=True)
         assert hass.states.get("sensor.kitchen_lights_status").state == "idle"
         assert entry.runtime_data.session is None
+
+        group.stop_stream()
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+        await _until(lambda: (c := server.get_client(client_id)) is None or not c.is_connected)
+
+
+async def test_bulb_that_stops_answering_is_rested(hass: HomeAssistant, sendspin_server) -> None:
+    """A bulb switched off at the wall must not be retried on every beat."""
+    server, port = sendspin_server
+    await async_setup_component(hass, "homeassistant", {})
+    lights = _add_zha_lights(hass, 3)
+    async_mock_service(hass, "light", "turn_on")
+    identity = new_identity_hex()
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_HOST: "127.0.0.1",
+            CONF_PORT: port,
+            CONF_NAME: "Kitchen Lights",
+            CONF_LIGHTS: lights,
+            CONF_IDENTITY: identity,
+        },
+        options={CONF_END_DELAY: 1},
+    )
+    entry.add_to_hass(hass)
+    attempts: list[int] = []
+
+    async def fake_send(self: ZhaOutput, cmd: Command) -> float:
+        attempts.append(cmd.target)
+        if cmd.target == 1:
+            raise TimeoutError("device did not respond")
+        return 0.05
+
+    with patch.object(ZhaOutput, "async_send", fake_send):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        await hass.services.async_call(
+            "select",
+            "select_option",
+            {"entity_id": "select.kitchen_lights_effect", "option": "beat_breathe"},
+            blocking=True,
+        )
+        client_id = client_id_for(identity)
+        await _until(lambda: server.get_client(client_id) is not None and server.get_client(client_id).is_connected)
+        await server.trust_unpaired(client_id)
+        await _until(lambda: hass.states.get("sensor.kitchen_lights_status").state == "idle")
+        group = server.get_client(client_id).group
+        stream = group.start_stream()
+        pcm = kick_pcm(6)
+        first_start = None
+        for offset in range(0, len(pcm), RATE // 10 * 4):
+            stream.prepare_audio(pcm[offset : offset + RATE // 10 * 4], FMT)
+            start = await stream.commit_audio()
+            if first_start is None:
+                first_start = start
+                group.group_role("visualizer").append_beat_schedule(
+                    [BeatTiming(first_start + k * BEAT_US, k % 4 == 0) for k in range(12)]
+                )
+            await stream.sleep_to_limit_buffer(1_500_000)
+        await _until(
+            lambda: (
+                "light.hue_bulb_1"
+                in hass.states.get("sensor.kitchen_lights_status").attributes.get("resting_bulbs", [])
+            )
+        )
+        failed_before = attempts.count(1)
+        await asyncio.sleep(2)
+        assert attempts.count(1) == failed_before  # rested: no more frames to it
+        assert attempts.count(0) > failed_before  # the others keep playing
 
         group.stop_stream()
         assert await hass.config_entries.async_unload(entry.entry_id)

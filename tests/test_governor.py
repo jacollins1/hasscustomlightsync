@@ -66,6 +66,14 @@ def test_priority_order_beats_before_colors() -> None:
     assert out[0].level is not None
 
 
+def test_color_before_level_at_the_same_moment() -> None:
+    # A bulb must not flash up in its old color: at equal priority the color goes first.
+    gov = Governor(rate_max=10, burst=1)
+    gov.offer([cmd(0, 100), cmd(0, 100, level=None, prio=PRIO_BEAT)])
+    out = gov.take(0.0, 100)
+    assert out[0].rgb is not None
+
+
 def test_group_frames_spaced() -> None:
     gov = Governor(rate_max=50, burst=10, group_min_interval_s=2.0)
     gov.offer([cmd(GROUP, 0, level=None)])
