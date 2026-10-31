@@ -8,9 +8,8 @@ Session lifecycle (only while the Sync switch is on):
   palette, then run the effect loop.
 * The stream ends -> wait ``end_delay`` seconds (pauses and track gaps
   shouldn't flicker the room), then restore the bulbs and resume automations.
-* Optional fallback: if a configured media player (e.g. the Node playing
-  native hi-res, not grouped with the lights) is playing without a Sendspin
-  stream, run the ambient palette mode from its album art instead.
+* Volume and track timing come from the speaker the room is playing with
+  (see music_context): no setting to keep in step.
 
 Hand-back safety: the pre-show light states and the list of paused entities
 are written to ``.storage`` before anything is changed. Home Assistant stopping
@@ -28,13 +27,12 @@ from collections.abc import Callable
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from homeassistant.const import EVENT_HOMEASSISTANT_STOP, STATE_OFF, STATE_ON, STATE_PLAYING, STATE_UNAVAILABLE
-from homeassistant.core import Event, EventStateChangedData, HomeAssistant, State, callback
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP, STATE_OFF, STATE_ON, STATE_UNAVAILABLE
+from homeassistant.core import Event, HomeAssistant, State, callback
 from homeassistant.helpers import area_registry as ar
-from homeassistant.helpers.event import async_call_later, async_track_state_change_event
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
-from homeassistant.util import dt as dt_util
 
 from .const import (
     COLOR_FORMAT_AUTO,
@@ -42,13 +40,12 @@ from .const import (
     CONF_AREA,
     CONF_COLOR_FORMAT,
     CONF_END_DELAY,
-    CONF_FALLBACK_PLAYER,
     CONF_GROUP_MIN_INTERVAL,
     CONF_HOST,
     CONF_IDENTITY,
     CONF_LAYOUT,
+    CONF_LAYOUT_SOURCE,
     CONF_LIGHTS,
-    CONF_MATCH_ROOMS,
     CONF_MAX_BRIGHTNESS,
     CONF_MIN_BRIGHTNESS,
     CONF_NAME,
@@ -56,25 +53,33 @@ from .const import (
     CONF_PAUSE_ENTITIES,
     CONF_PORT,
     CONF_RATE_MAX,
+    CONF_SHOW_MODE,
     CONF_ZHA_GROUP_ID,
     DEFAULT_AMBIENT_PERIOD,
     DEFAULT_END_DELAY,
     DEFAULT_GROUP_MIN_INTERVAL,
-    DEFAULT_MATCH_ROOMS,
     DEFAULT_MAX_BRIGHTNESS,
     DEFAULT_MIN_BRIGHTNESS,
     DEFAULT_PAUSE_ADAPTIVE,
     DEFAULT_PORT,
     DEFAULT_RATE_MAX,
+    DEFAULT_SHOW_MODE,
     DOMAIN,
+    LAYOUT_FLOOR_PLAN,
+    LAYOUT_MANUAL,
     SENDSPIN_PATH,
+    SHOW_HOUSE,
+    SHOW_INDEPENDENT,
+    SHOW_MIRRORED,
     TICK_S,
     VERSION,
 )
 from .engine import GROUP, Command, EffectEngine, EngineSettings, Mode
+from .floorplan import room_positions
 from .governor import Governor
 from .hub import async_get_hub
-from .palette import build_palette, palette_from_image
+from .music_context import MusicContext, music_context
+from .palette import build_palette
 from .sendspin_link import LinkState, SendspinLink
 from .zigbee import (
     Bulb,
@@ -92,7 +97,6 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-FALLBACK_GRACE_S = 4.0  # let a real Sendspin stream win when both start together
 LOOP_ERROR_LOG_EVERY_S = 30.0
 BULB_FAILS_TO_REST = 4  # consecutive failed frames before a bulb is rested
 BULB_REST_S = 60
@@ -109,14 +113,12 @@ class Status(StrEnum):
     AWAITING_APPROVAL = "awaiting_approval"
     IDLE = "idle"
     SYNCING = "syncing"
-    AMBIENT_FALLBACK = "ambient_fallback"
 
 
 class Session(StrEnum):
     """Which feature source is driving the lights."""
 
     STREAM = "stream"
-    FALLBACK = "fallback"
 
 
 def parse_layout(text: str | None, bulbs: int | list[str]) -> list[tuple[float, float]] | None:
@@ -214,7 +216,6 @@ class LightSyncController:
         self.light_ids: list[str] = list(entry.data[CONF_LIGHTS])
         self.area_id: str | None = entry.data.get(CONF_AREA)
         self.group_id: int | None = opts.get(CONF_ZHA_GROUP_ID) or None
-        self.fallback_player: str | None = opts.get(CONF_FALLBACK_PLAYER) or None
         self.pause_entities: list[str] = list(opts.get(CONF_PAUSE_ENTITIES, []))
         self.pause_adaptive = bool(opts.get(CONF_PAUSE_ADAPTIVE, DEFAULT_PAUSE_ADAPTIVE))
         self.end_delay_s = float(opts.get(CONF_END_DELAY, DEFAULT_END_DELAY))
@@ -225,7 +226,12 @@ class LightSyncController:
         self._layout_text: str | None = opts.get(CONF_LAYOUT)
         self._track_key: object = None
         self._context_at = 0.0
-        self.match_rooms = bool(opts.get(CONF_MATCH_ROOMS, DEFAULT_MATCH_ROOMS))
+        self.show_mode: str = opts.get(CONF_SHOW_MODE, DEFAULT_SHOW_MODE)
+        self.layout_source: str = opts.get(CONF_LAYOUT_SOURCE, LAYOUT_MANUAL)
+        # Floor plan positions of this room's bulbs (feet, house frame), None if any is unpinned.
+        self.floor_positions: list[tuple[float, float]] | None = None
+        self.unpinned: list[str] = []
+        self.layout_in_use = "row"
         self.color_format: str = opts.get(CONF_COLOR_FORMAT, COLOR_FORMAT_AUTO)
         self.rate_max = float(opts.get(CONF_RATE_MAX, DEFAULT_RATE_MAX))
         # One Zigbee budget for the whole house: every room shares the coordinator.
@@ -242,7 +248,6 @@ class LightSyncController:
         self.bulbs: list[Bulb] = []
         self.output: ZhaOutput | None = None
         self.engine: EffectEngine | None = None
-        self.fallback_engine: EffectEngine | None = None
 
         port = int(entry.data.get(CONF_PORT, DEFAULT_PORT))
         self.link = SendspinLink(
@@ -262,7 +267,6 @@ class LightSyncController:
         self._tick_task: asyncio.Task[None] | None = None
         self._send_tasks: set[asyncio.Task[None]] = set()
         self._end_cancel: Callable[[], None] | None = None
-        self._fallback_cancel: Callable[[], None] | None = None
         self._captured: dict[str, dict[str, Any]] = {}
         self._paused: list[str] = []
         self._unsubs: list[Callable[[], None]] = []
@@ -271,7 +275,6 @@ class LightSyncController:
         self._retries = 0
         self._update_listeners: list[Callable[[], None]] = []
         self._session_lock = asyncio.Lock()
-        self._fallback_art: str | None = None
         self._last_loop_error_s = 0.0
         # A bulb that keeps failing (e.g. switched off at the wall) is rested
         # instead of retried on every beat: each failed frame costs seconds of
@@ -287,11 +290,7 @@ class LightSyncController:
         if self.area_id is None:
             self.area_id = room_area_of(self.hass, [b.entity_id for b in self.bulbs])
         self.output = ZhaOutput(self.hass, self.bulbs, self.group_id)
-        try:
-            layout = parse_layout(self._layout_text, [b.entity_id for b in self.bulbs])
-        except ValueError as err:
-            _LOGGER.warning("%s: ignoring bulb layout (%s); using configured order", self.name, err)
-            layout = None
+        layout = self._room_layout()
         settings = EngineSettings(
             bulbs=len(self.bulbs),
             layout=layout,
@@ -306,7 +305,32 @@ class LightSyncController:
         self.engine = EffectEngine(settings, self.mode)
         self.engine.intensity = self.intensity
         self.engine.budget_per_s = self.governor.rate
-        self.fallback_engine = EffectEngine(settings, Mode.AMBIENT)
+
+    def _room_layout(self) -> list[tuple[float, float]] | None:
+        """Bulb positions: the floor plan's pins, else the layout text, else a row."""
+        self.floor_positions, self.unpinned = room_positions(
+            self.hass, self.hub.pins, [b.entity_id for b in self.bulbs]
+        )
+        if self.layout_source == LAYOUT_FLOOR_PLAN and self.floor_positions is not None:
+            self.layout_in_use = "floor plan"
+            return self.floor_positions
+        try:
+            layout = parse_layout(self._layout_text, [b.entity_id for b in self.bulbs])
+        except ValueError as err:
+            _LOGGER.warning("%s: ignoring bulb layout (%s); using configured order", self.name, err)
+            layout = None
+        if self.layout_source == LAYOUT_FLOOR_PLAN:
+            _LOGGER.info("%s: not every bulb is pinned on the floor plan (%s)", self.name, ", ".join(self.unpinned))
+        self.layout_in_use = "manual" if layout else "row"
+        return layout
+
+    @callback
+    def pins_changed(self) -> None:
+        """The floor plan was saved: re-read this room's positions."""
+        if self.engine is None:
+            return
+        self.engine.choreo.set_layout(self._room_layout())
+        self._notify()
 
     async def async_connect(self) -> None:
         """Start listening (after the entities restored armed/mode/offset)."""
@@ -322,10 +346,6 @@ class LightSyncController:
 
             self.entry.async_on_unload(async_at_started(self.hass, _hand_back_leftover))
 
-        if self.fallback_player:
-            self._unsubs.append(
-                async_track_state_change_event(self.hass, [self.fallback_player], self._on_fallback_player)
-            )
         self._stop_unsub = self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, self._async_on_hass_stop)
         await self.hub.async_add_room(self)
         await self.link.async_start()
@@ -422,8 +442,6 @@ class LightSyncController:
     def status(self) -> Status:
         """Overall state for the status sensor."""
         link = self.link.state
-        if self.session is Session.FALLBACK:
-            return Status.AMBIENT_FALLBACK
         if link is LinkState.DISCONNECTED:
             return Status.DISCONNECTED
         if link is LinkState.CONNECTING:
@@ -434,7 +452,7 @@ class LightSyncController:
 
     def status_attributes(self) -> dict[str, Any]:
         """Diagnostics shown on the status sensor."""
-        engine = self.fallback_engine if self.session is Session.FALLBACK else self.engine
+        engine = self.engine
         gov = self.governor
         return {
             "mode": self.mode.value,
@@ -445,8 +463,13 @@ class LightSyncController:
             "room_share_fps": round(gov.rate, 1),
             "rooms_playing": gov.airtime.rooms_playing(time.monotonic()),
             "show_group": self.show_group,
-            "matched_rooms": self._matched_rooms(),
+            "show_mode": self.show_mode,
+            "show": self._show_description(),
+            "sharing_show_with": self._sharing_with(),
+            "layout": self.layout_in_use,
+            "unpinned_bulbs": self.unpinned,
             "paused_during_show": self.pause_targets(),
+            "following_speaker": self._speaker_name(),
             "color_formats": sorted({f"{b.model or '?'}: {b.color_format}" for b in self.bulbs}),
             "light_sync_groups_error": self.hub.groups.last_error if self.hub.groups else None,
             "zigbee_rtt_ms": None if gov.rtt_s is None else round(gov.rtt_s * 1000),
@@ -472,8 +495,6 @@ class LightSyncController:
             await self._async_end_session()
         elif self._stream_active:
             await self._async_begin(Session.STREAM)
-        else:
-            self._maybe_schedule_fallback()
         self._notify()
 
     def set_mode(self, mode: Mode) -> None:
@@ -512,23 +533,35 @@ class LightSyncController:
     def _apply_show_group(self, group_id: str | None) -> None:
         if self.engine is None:
             return
-        if group_id != self.show_group:
-            self.hub.release_director(self.show_group, id(self))
+        previous = self.show_group
+        if group_id != previous:
+            self.hub.release_director(previous, id(self))
+            self.engine.choreo.use_canvas(None)
         self.show_group = group_id
-        if self.match_rooms and group_id is not None:
+        if group_id is not None and self.show_mode in (SHOW_HOUSE, SHOW_MIRRORED):
             self.engine.choreo.use_director(self.hub.acquire_director(group_id, id(self)))
         else:
             self.engine.choreo.use_director(None)
+        for group in {previous, group_id} - {None}:
+            self.hub.refresh_canvas(group)
 
-    def _matched_rooms(self) -> list[str]:
+    def _sharing_with(self) -> list[str]:
         """Other rooms sharing this room's show right now."""
-        if not self.match_rooms or self.show_group is None:
+        if self.show_mode == SHOW_INDEPENDENT or self.show_group is None:
             return []
         return sorted(
             c.name
             for c in self.hub.rooms.values()
-            if c is not self and c.match_rooms and c.show_group == self.show_group
+            if c is not self and c.show_mode != SHOW_INDEPENDENT and c.show_group == self.show_group
         )
+
+    def _show_description(self) -> str:
+        others = self._sharing_with()
+        if not others:
+            return "own show"
+        if self.engine is not None and self.engine.choreo.on_canvas:
+            return "house-wide"
+        return "mirrored"
 
     @callback
     def on_stream_start(self, tracks_downbeats: bool, types: tuple[str, ...]) -> None:
@@ -562,7 +595,6 @@ class LightSyncController:
             self.engine.reset()
         if self.session is Session.STREAM:
             self._schedule_end()
-        self._maybe_schedule_fallback()
 
     @callback
     def on_frames(self, frames: list[VisualizerFrame]) -> None:
@@ -595,73 +627,6 @@ class LightSyncController:
         self.engine.set_palette(build_palette(sources))
         self._notify()
 
-    # ------------------------------------------------------------- fallback
-
-    @callback
-    def _on_fallback_player(self, event: Event[EventStateChangedData]) -> None:
-        new = event.data["new_state"]
-        if new is None or self._stopping:
-            return
-        art = new.attributes.get("entity_picture")
-        if self.session is Session.FALLBACK and art != self._fallback_art:
-            self.entry.async_create_task(self.hass, self._async_load_fallback_palette(), "album art palette")
-        if new.state == STATE_PLAYING:
-            if self.session is Session.FALLBACK:
-                self._cancel_end()
-            self._maybe_schedule_fallback()
-        elif self.session is Session.FALLBACK:
-            self._schedule_end()
-
-    def _fallback_wanted(self) -> bool:
-        if self._stopping or not (self.armed and self.fallback_player) or self._stream_active:
-            return False
-        state = self.hass.states.get(self.fallback_player)
-        return state is not None and state.state == STATE_PLAYING
-
-    @callback
-    def _maybe_schedule_fallback(self) -> None:
-        if self._fallback_cancel or not self._fallback_wanted() or self.session is not None:
-            return
-
-        @callback
-        def _go(_now: Any) -> None:
-            self._fallback_cancel = None
-            if self._fallback_wanted() and self.session is None:
-                self.entry.async_create_task(self.hass, self._async_begin(Session.FALLBACK), "start ambient")
-
-        self._fallback_cancel = async_call_later(self.hass, FALLBACK_GRACE_S, _go)
-
-    async def _async_load_fallback_palette(self) -> None:
-        """Album art of the fallback player -> palette."""
-        if self.fallback_engine is None or not self.fallback_player:
-            return
-        state = self.hass.states.get(self.fallback_player)
-        self._fallback_art = state.attributes.get("entity_picture") if state else None
-        image = await self._async_player_image(self.fallback_player)
-        if image is None:
-            return
-        try:
-            palette = await self.hass.async_add_executor_job(palette_from_image, image)
-        except Exception:  # noqa: BLE001 - a bad image must not stop the show
-            _LOGGER.debug("Could not extract palette from album art", exc_info=True)
-            return
-        self.fallback_engine.set_palette(palette)
-        self._notify()
-
-    async def _async_player_image(self, entity_id: str) -> bytes | None:
-        from homeassistant.components.media_player import DATA_COMPONENT  # noqa: PLC0415
-
-        component = self.hass.data.get(DATA_COMPONENT)
-        entity = component.get_entity(entity_id) if component else None
-        if entity is None:
-            return None
-        try:
-            image, _content_type = await entity.async_get_media_image()
-        except Exception:  # noqa: BLE001
-            _LOGGER.debug("Could not fetch album art for %s", entity_id, exc_info=True)
-            return None
-        return image
-
     # -------------------------------------------------------------- sessions
 
     def _cancel_end(self) -> None:
@@ -674,9 +639,6 @@ class LightSyncController:
         if self._retry_cancel:
             self._retry_cancel()
             self._retry_cancel = None
-        if self._fallback_cancel:
-            self._fallback_cancel()
-            self._fallback_cancel = None
 
     @callback
     def _schedule_end(self) -> None:
@@ -694,9 +656,6 @@ class LightSyncController:
     async def _async_after_end(self) -> None:
         if self._stopping or (self._stream_active and self.armed):
             return
-        if self._fallback_wanted():
-            await self._async_begin(Session.FALLBACK)
-            return
         await self._async_end_session()
 
     async def _async_begin(self, kind: Session) -> None:
@@ -713,9 +672,7 @@ class LightSyncController:
             self.session = kind
             if first:
                 await self._async_take_over()
-            if kind is Session.FALLBACK:
-                await self._async_load_fallback_palette()
-            engine = self.fallback_engine if kind is Session.FALLBACK else self.engine
+            engine = self.engine
             assert engine is not None
             await self._async_prime(engine.palette)
             if self._tick_task is None:
@@ -724,8 +681,7 @@ class LightSyncController:
                 )
             _LOGGER.info("%s: light show started (%s)", self.name, kind.value)
         # The music may have stopped while we were taking over.
-        still_wanted = (self._stream_active and self.armed) if kind is Session.STREAM else self._fallback_wanted()
-        if not still_wanted:
+        if not (self._stream_active and self.armed):
             self._schedule_end()
         self._notify()
 
@@ -866,10 +822,6 @@ class LightSyncController:
 
     def _clock(self) -> tuple[EffectEngine, int, int] | None:
         """Engine plus 'now' and lead on that engine's clock; None if unavailable."""
-        if self.session is Session.FALLBACK:
-            if self.fallback_engine is None:
-                return None
-            return self.fallback_engine, time.monotonic_ns() // 1000, 0
         if self.engine is None or not self.link.available:
             return None  # link dropped; the end-of-stream grace timer is running
         return self.engine, self.link.now_us(), self._lead_us()
@@ -902,34 +854,38 @@ class LightSyncController:
                 self._notify()
             await asyncio.sleep(TICK_S)
 
+    def _music(self) -> MusicContext | None:
+        hub = self.hub
+        return music_context(
+            hub.players(),
+            self.link.client_id,
+            room_ids=[c.link.client_id for c in hub.rooms.values() if c.link.client_id],
+            speaker_for=hub.speaker_for(),
+        )
+
+    def _speaker_name(self) -> str | None:
+        context = self._music()
+        if context is None or context.speaker_id is None:
+            return None
+        hub = self.hub
+        return (hub.groups.speakers.get(context.speaker_id) if hub.groups else None) or context.speaker_id
+
     @callback
     def _update_music_context(self) -> None:
-        """Volume, time left in the track and track changes, from the music player."""
-        if self.engine is None or not self.fallback_player:
+        """Volume, time left in the track and track changes, from the speaker playing."""
+        if self.engine is None:
             return
-        state = self.hass.states.get(self.fallback_player)
         choreo = self.engine.choreo
-        if state is None:
+        context = self._music()
+        if context is None:
             choreo.volume = choreo.track_remaining_s = None
             return
-        attrs = state.attributes
-        volume = attrs.get("volume_level")
-        choreo.volume = None if volume is None or attrs.get("is_volume_muted") else float(volume)
-        duration, position = attrs.get("media_duration"), attrs.get("media_position")
-        updated = attrs.get("media_position_updated_at")
-        remaining = None
-        if state.state == STATE_PLAYING and duration and position is not None:
-            elapsed = float(position)
-            if updated is not None:
-                with contextlib.suppress(AttributeError, TypeError):
-                    elapsed += (dt_util.utcnow() - updated).total_seconds()
-            remaining = float(duration) - elapsed
-        choreo.track_remaining_s = remaining
-        track = (attrs.get("media_content_id"), attrs.get("media_title"))
-        if track != self._track_key:
-            if self._track_key is not None and any(track):
+        choreo.volume = context.volume
+        choreo.track_remaining_s = context.remaining_s
+        if context.track != self._track_key:
+            if self._track_key is not None and context.track is not None:
                 choreo.reset()  # a new song tells its own story
-            self._track_key = track
+            self._track_key = context.track
 
     async def _async_send(self, cmd: Command) -> None:
         assert self.output is not None

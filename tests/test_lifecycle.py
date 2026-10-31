@@ -253,7 +253,7 @@ async def test_group_helper_restored_unavailable_at_boot_retries(hass: HomeAssis
 
 
 async def test_rooms_in_one_group_share_a_show_and_the_zigbee_budget(hass: HomeAssistant) -> None:
-    from custom_components.music_light_sync.const import CONF_MATCH_ROOMS  # noqa: PLC0415
+    from custom_components.music_light_sync.const import CONF_SHOW_MODE  # noqa: PLC0415
 
     kitchen = _entry(hass, _lights(hass, 2), [])
     registry = er.async_get(hass)
@@ -269,7 +269,7 @@ async def test_rooms_in_one_group_share_a_show_and_the_zigbee_budget(hass: HomeA
         hass.states.async_set(e.entity_id, "on", {"brightness": 100})
         loner_lights.append(e.entity_id)
     loner = _entry(hass, loner_lights, [])
-    hass.config_entries.async_update_entry(loner, options={**loner.options, CONF_MATCH_ROOMS: False})
+    hass.config_entries.async_update_entry(loner, options={**loner.options, CONF_SHOW_MODE: "independent"})
     assert await hass.config_entries.async_setup(kitchen.entry_id)  # sets up every room of the domain
     await hass.async_block_till_done()
     a, b, c = kitchen.runtime_data, dining.runtime_data, loner.runtime_data
@@ -278,7 +278,8 @@ async def test_rooms_in_one_group_share_a_show_and_the_zigbee_budget(hass: HomeA
         controller.on_group("living-room-light-sync")
     assert a.engine.choreo.director is b.engine.choreo.director  # matching rooms: one show
     assert c.engine.choreo.director is not a.engine.choreo.director  # this room plays on its own
-    assert a.status_attributes()["matched_rooms"] == ["Kitchen Lights"]  # (both test rooms share a name)
+    assert a.status_attributes()["sharing_show_with"] == ["Kitchen Lights"]  # (both test rooms share a name)
+    assert a.status_attributes()["show"] == "mirrored"
     b.on_group("dining-alone")  # dining room ungrouped: back to its own show
     assert a.engine.choreo.director is not b.engine.choreo.director
     for entry in (kitchen, dining, loner):
@@ -383,3 +384,93 @@ async def test_shared_adaptive_lighting_switch_waits_for_the_last_room(hass: Hom
     for entry in (kitchen, kitchen_table):
         assert await hass.config_entries.async_unload(entry.entry_id)
     patcher.stop()
+
+
+def _pinned_lights(hass: HomeAssistant, prefix: str, ieee_base: int, count: int) -> tuple[list[str], list[str]]:
+    """ZHA lights with devices (the floor plan pins devices)."""
+    from homeassistant.helpers import device_registry as dr  # noqa: PLC0415
+
+    owner = MockConfigEntry(domain="zha")
+    owner.add_to_hass(hass)
+    lights, devices = [], []
+    for i in range(count):
+        ieee = f"00:17:88:01:0b:00:0{ieee_base}:{i:02x}"
+        device = dr.async_get(hass).async_get_or_create(config_entry_id=owner.entry_id, identifiers={("zha", ieee)})
+        e = er.async_get(hass).async_get_or_create(
+            "light", "zha", f"{ieee}-11", suggested_object_id=f"{prefix}{i}", device_id=device.id
+        )
+        hass.states.async_set(e.entity_id, "on", {"brightness": 100})
+        lights.append(e.entity_id)
+        devices.append(device.id)
+    return lights, devices
+
+
+async def test_house_wide_rooms_share_one_canvas_from_the_floor_plan(hass: HomeAssistant) -> None:
+    from custom_components.music_light_sync.const import CONF_LAYOUT_SOURCE, CONF_SHOW_MODE  # noqa: PLC0415
+    from custom_components.music_light_sync.floorplan import Pin  # noqa: PLC0415
+
+    k_lights, k_devices = _pinned_lights(hass, "k", 1, 5)
+    d_lights, d_devices = _pinned_lights(hass, "d", 2, 4)
+    pins = {d: Pin(10.0 + i, 45.0, None) for i, d in enumerate(k_devices)}
+    pins.update({d: Pin(25.0 + i, 30.0, None) for i, d in enumerate(d_devices)})
+    kitchen, dining = _entry(hass, k_lights, []), _entry(hass, d_lights, [])
+    for entry in (kitchen, dining):
+        hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_SHOW_MODE: "house"})
+    with patch("custom_components.music_light_sync.hub.async_load_pins", AsyncMock(return_value=pins)):
+        assert await hass.config_entries.async_setup(kitchen.entry_id)
+        await hass.async_block_till_done()
+    a, b = kitchen.runtime_data, dining.runtime_data
+    # Upgraded rooms with every bulb pinned start on the floor plan.
+    assert kitchen.options[CONF_LAYOUT_SOURCE] == dining.options[CONF_LAYOUT_SOURCE] == "floor_plan"
+    assert a.layout_in_use == "floor plan"
+    a.on_group("living-room-light-sync")
+    b.on_group("living-room-light-sync")
+    assert a.engine.choreo.on_canvas and b.engine.choreo.on_canvas
+    assert a.engine.choreo.bulbs == b.engine.choreo.bulbs == 9
+    assert a.status_attributes()["show"] == "house-wide"
+    b.on_group("dining-alone")  # the dining room leaves: the kitchen is back on its own bulbs
+    assert not a.engine.choreo.on_canvas and not b.engine.choreo.on_canvas
+    for entry in (kitchen, dining):
+        assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_pinning_the_last_bulb_switches_the_room_to_the_floor_plan(hass: HomeAssistant) -> None:
+    from custom_components.music_light_sync.const import CONF_LAYOUT_SOURCE  # noqa: PLC0415
+    from custom_components.music_light_sync.floorplan import Pin  # noqa: PLC0415
+
+    lights, devices = _pinned_lights(hass, "d", 2, 4)
+    some = {d: Pin(25.0 + i, 30.0, None) for i, d in enumerate(devices[:3])}
+    entry = _entry(hass, lights, [])
+    load = AsyncMock(return_value=some)
+    with patch("custom_components.music_light_sync.hub.async_load_pins", load):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert entry.options[CONF_LAYOUT_SOURCE] == "manual"  # one bulb unpinned
+        assert entry.runtime_data.status_attributes()["unpinned_bulbs"] == [lights[3]]
+        load.return_value = {**some, devices[3]: Pin(28.0, 36.0, None)}
+        hass.bus.async_fire("lovelace_updated", {"url_path": "floorplan-positions"})
+        await hass.async_block_till_done()
+        await hass.async_block_till_done()
+        assert entry.options[CONF_LAYOUT_SOURCE] == "floor_plan"
+        assert entry.runtime_data.layout_in_use == "floor plan"  # reloaded with the plan's positions
+        # Saving another dashboard changes nothing.
+        load.reset_mock()
+        hass.bus.async_fire("lovelace_updated", {"url_path": "dashboard-home"})
+        await hass.async_block_till_done()
+        load.assert_not_called()
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_a_pin_from_another_room_does_not_count(hass: HomeAssistant) -> None:
+    from homeassistant.helpers import area_registry as ar  # noqa: PLC0415
+    from homeassistant.helpers import device_registry as dr  # noqa: PLC0415
+
+    from custom_components.music_light_sync.floorplan import Pin, room_positions  # noqa: PLC0415
+
+    lights, devices = _pinned_lights(hass, "x", 3, 2)
+    dining = ar.async_get(hass).async_create("Dining Room")
+    for device in devices:
+        dr.async_get(hass).async_update_device(device, area_id=dining.id)
+    pins = {devices[0]: Pin(1.0, 2.0, dining.id), devices[1]: Pin(3.0, 4.0, "kitchen")}  # moved since pinned
+    positions, missing = room_positions(hass, pins, lights)
+    assert positions is None and missing == [lights[1]]

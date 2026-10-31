@@ -20,8 +20,22 @@ from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.storage import Store
 
-from .const import CONF_AREA, CONF_FALLBACK_PLAYER, CONF_LIGHTS, CONF_PAUSE_ENTITIES, DOMAIN
+from .const import (
+    CONF_AREA,
+    CONF_FALLBACK_PLAYER,
+    CONF_LAYOUT_SOURCE,
+    CONF_LIGHTS,
+    CONF_MATCH_ROOMS,
+    CONF_PAUSE_ENTITIES,
+    CONF_SHOW_MODE,
+    DOMAIN,
+    LAYOUT_FLOOR_PLAN,
+    LAYOUT_MANUAL,
+    SHOW_INDEPENDENT,
+    SHOW_MIRRORED,
+)
 from .controller import LightSyncController
+from .hub import async_get_hub
 from .zigbee import BulbResolveError, BulbsNotReady, room_area_of
 
 _LOGGER = logging.getLogger(__name__)
@@ -33,6 +47,7 @@ type LightSyncConfigEntry = ConfigEntry[LightSyncController]
 
 async def async_setup_entry(hass: HomeAssistant, entry: LightSyncConfigEntry) -> bool:
     """Set up one room."""
+    await async_get_hub(hass).async_ensure_pins()
     controller = LightSyncController(hass, entry)
     try:
         controller.prepare()
@@ -40,6 +55,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: LightSyncConfigEntry) ->
         raise ConfigEntryNotReady(str(err)) from err
     except BulbResolveError as err:
         raise ConfigEntryError(str(err)) from err
+    if CONF_LAYOUT_SOURCE not in entry.options:
+        # First setup after the upgrade: the floor plan when every bulb is pinned.
+        controller.layout_source = LAYOUT_FLOOR_PLAN if controller.floor_positions is not None else LAYOUT_MANUAL
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, CONF_LAYOUT_SOURCE: controller.layout_source}
+        )
+        controller.pins_changed()
     entry.runtime_data = controller
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     await controller.async_connect()
@@ -77,11 +99,9 @@ def rename_in_config(
     if old in data.get(CONF_LIGHTS, []):
         new_data = {**data, CONF_LIGHTS: [new if e == old else e for e in data[CONF_LIGHTS]]}
     new_options = None
-    if old in options.get(CONF_PAUSE_ENTITIES, []) or options.get(CONF_FALLBACK_PLAYER) == old:
+    if old in options.get(CONF_PAUSE_ENTITIES, []):
         new_options = dict(options)
         new_options[CONF_PAUSE_ENTITIES] = [new if e == old else e for e in options.get(CONF_PAUSE_ENTITIES, [])]
-        if options.get(CONF_FALLBACK_PLAYER) == old:
-            new_options[CONF_FALLBACK_PLAYER] = new
     return new_data, new_options
 
 
@@ -111,8 +131,11 @@ def _rename_follower(hass: HomeAssistant, entry: ConfigEntry) -> Any:
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """1 -> 2: entries became rooms; record the room's area."""
-    if entry.version > 2:
+    """1 -> 2: entries became rooms (record the area).
+    2 -> 3: "match other rooms" became the show mode, the music player setting
+    went (the room follows the speaker it plays with), and the layout source
+    starts on the floor plan when every bulb is pinned there."""
+    if entry.version > 3:
         return False
     if entry.version == 1:
         area = room_area_of(hass, list(entry.data.get(CONF_LIGHTS, [])))
@@ -120,4 +143,12 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             area = None
         hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_AREA: area}, version=2)
         _LOGGER.info("Migrated %s to a room (area %s)", entry.title, area)
+    if entry.version == 2:
+        # The layout source is decided at the first setup, once the bulbs resolve.
+        options = dict(entry.options)
+        match = options.pop(CONF_MATCH_ROOMS, True)
+        options.pop(CONF_FALLBACK_PLAYER, None)
+        options.setdefault(CONF_SHOW_MODE, SHOW_MIRRORED if match else SHOW_INDEPENDENT)
+        hass.config_entries.async_update_entry(entry, options=options, version=3)
+        _LOGGER.info("Migrated %s: show %s", entry.title, options[CONF_SHOW_MODE])
     return True

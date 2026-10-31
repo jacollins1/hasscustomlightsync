@@ -70,12 +70,12 @@
           "pause_entities": "Pause during a show",
           "end_delay": "Restore the lights after this much silence",
           "ambient_period": "Ambient palette cycle",
-          "fallback_player": "Music player",
-          "layout": "Bulb layout",
-          "match_rooms": "Match other rooms",
+          "pause_adaptive_lighting": "Pause Adaptive Lighting during a show",
+          "show_mode": "When this room plays with other rooms",
           "color_format": "Color format",
           "light_sync_speakers": "Light sync speakers",
-          "pause_adaptive_lighting": "Pause Adaptive Lighting during a show"
+          "layout_source": "Bulb positions from",
+          "layout": "Bulb layout (manual)"
         },
         "data_description": {
           "zha_group_id": "Optional, recommended. A ZHA group containing exactly these bulbs. Whole-room changes (the drop's white flash) then take one multicast frame, which keeps drops on time.",
@@ -83,19 +83,20 @@
           "group_min_interval": "Multicast frames use the coordinator's small broadcast table. Keep this at 2 s or more.",
           "pause_entities": "Other automations, switches or input booleans to turn off during a show and back on afterwards, if they were on. The room's Adaptive Lighting switches are handled by the option above.",
           "end_delay": "Pausing, skipping and short gaps between tracks do not restore the lights unless the silence lasts longer than this.",
-          "fallback_player": "Optional, recommended. The speaker the lights follow (e.g. the Music Assistant player). Party mode uses its volume (quiet = gentle lights), its track timing (outro in the last 20 seconds) and track changes. When it plays without the light player grouped, the lights run the ambient palette from its album art.",
-          "layout": "Optional. One line per bulb: 'x, y' from 0 to 100 (0, 0 = top left of a floor plan). Start a line with the bulb's entity id ('light.dining_bulb_1: 22, 29') or its number in the Lights list ('3: 76, 72'); lines without one are taken in Lights order. Party mode uses it for left/right and top/bottom splits, nearest-neighbor pairs, sweeps and waves. Empty = bulbs in a row.",
-          "match_rooms": "When this room plays in the same Music Assistant group as other rooms with this on, they run one show together: same colors, rhythm, rate and section changes on the same beat, each mapped onto its own bulbs. Off: this room runs its own show even when grouped.",
+          "pause_adaptive_lighting": "Turns off every Adaptive Lighting switch that controls this room's lights when a show starts, and turns each one back on (if it was on) when the show has ended. A switch shared with another room that is still playing stays off until that room's show ends too.",
+          "show_mode": "Applies when this room plays in the same Music Assistant group as other rooms. House-wide: rooms set to house-wide draw one show across all their bulbs, so chases and waves travel from room to room (needs every bulb pinned on the floor plan; otherwise mirrored). Mirrored: the same colors, rhythm and section changes on the same beat, each room on its own bulbs. Independent: this room runs its own show.",
           "color_format": "How colors are sent. Automatic sends each bulb its native format (Hue: CIE xy, Third Reality: hue/saturation, like its 'Native hue/saturation color' quirk switch). Nothing on the bulbs is switched, so there is nothing to put back. Force one format if Hue and Third Reality colors don't match side by side.",
           "light_sync_speakers": "This room joins the '<speaker> - Light sync' player of every speaker ticked here. Playing to that player runs the lights in all rooms that joined it. All ticked = also join speakers added later.",
-          "pause_adaptive_lighting": "Turns off every Adaptive Lighting switch that controls this room's lights when a show starts, and turns each one back on (if it was on) when the show has ended. A switch shared with another room that is still playing stays off until that room's show ends too."
+          "layout_source": "Floor plan: where each bulb is pinned on the floor plan dashboard, updated whenever the plan is saved. Manual: the text below. A room switches to the floor plan by itself once every one of its bulbs is pinned.",
+          "layout": "Used with Manual. One line per bulb: 'x, y' from 0 to 100 (0, 0 = top left). Start a line with the bulb's entity id ('light.dining_bulb_1: 22, 29') or its number in the Lights list ('3: 76, 72'); lines without one are taken in Lights order. Party mode uses positions for left/right and top/bottom splits, nearest-neighbor pairs, sweeps and waves. Empty = bulbs in a row."
         }
       }
     },
     "error": {
       "group_members": "That ZHA group must contain exactly the configured bulbs, no more and no fewer. Extra members would be left in show colors.",
       "group_missing": "That ZHA group no longer exists.",
-      "layout_invalid": "Enter one 'x, y' line (0-100) for every bulb; a line may start with the bulb's entity id or number."
+      "layout_invalid": "Enter one 'x, y' line (0-100) for every bulb; a line may start with the bulb's entity id or number.",
+      "not_pinned": "Not every bulb is pinned on the floor plan yet: {unpinned}. Pin them there, or use Manual."
     }
   },
   "entity": {
@@ -132,8 +133,7 @@
           "connecting": "Connecting",
           "awaiting_approval": "Waiting for approval in Music Assistant",
           "idle": "Idle",
-          "syncing": "Syncing",
-          "ambient_fallback": "Ambient (fallback player)"
+          "syncing": "Syncing"
         }
       }
     }
@@ -144,6 +144,19 @@
         "auto": "Automatic (each bulb's native format)",
         "hs": "Hue/saturation for every bulb",
         "xy": "CIE xy for every bulb"
+      }
+    },
+    "show_mode": {
+      "options": {
+        "house": "House-wide (one show across the rooms)",
+        "mirrored": "Mirrored (same show in each room)",
+        "independent": "Independent (this room's own show)"
+      }
+    },
+    "layout_source": {
+      "options": {
+        "floor_plan": "Floor plan",
+        "manual": "Manual"
       }
     }
   }

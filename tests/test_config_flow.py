@@ -18,10 +18,10 @@ from custom_components.music_light_sync import async_migrate_entry, rename_in_co
 from custom_components.music_light_sync.const import (
     CONF_AREA,
     CONF_COLOR_FORMAT,
-    CONF_FALLBACK_PLAYER,
     CONF_HOST,
     CONF_IDENTITY,
     CONF_LAYOUT,
+    CONF_LAYOUT_SOURCE,
     CONF_LIGHTS,
     CONF_MATCH_ROOMS,
     CONF_MAX_BRIGHTNESS,
@@ -29,6 +29,7 @@ from custom_components.music_light_sync.const import (
     CONF_NAME,
     CONF_PAUSE_ENTITIES,
     CONF_PORT,
+    CONF_SHOW_MODE,
     CONF_ZHA_GROUP_ID,
     DOMAIN,
 )
@@ -93,7 +94,8 @@ async def test_add_room_prefills_name_and_the_areas_color_lights(hass: HomeAssis
     assert result["data"][CONF_AREA] == dining.id
     assert result["data"][CONF_HOST] == CONNECTION[CONF_HOST]
     assert len(result["data"][CONF_IDENTITY]) == 64
-    assert result["options"] == {CONF_MATCH_ROOMS: True, CONF_COLOR_FORMAT: "auto"}
+    # No floor plan dashboard in this test: positions start as manual.
+    assert result["options"] == {CONF_SHOW_MODE: "mirrored", CONF_COLOR_FORMAT: "auto", CONF_LAYOUT_SOURCE: "manual"}
 
 
 async def test_second_room_reuses_the_connection_and_warns_on_untested_bulbs(hass: HomeAssistant) -> None:
@@ -164,7 +166,7 @@ async def test_reconfigure_changes_lights_and_keeps_the_player(hass: HomeAssista
             CONF_IDENTITY: "11" * 32,
             CONF_AREA: kitchen.id,
         },
-        options={CONF_LAYOUT: "1, 2", CONF_ZHA_GROUP_ID: 3, CONF_MATCH_ROOMS: True},
+        options={CONF_LAYOUT: "1, 2", CONF_ZHA_GROUP_ID: 3, CONF_SHOW_MODE: "house"},
     )
     entry.add_to_hass(hass)
     result = await entry.start_reconfigure_flow(hass)
@@ -177,7 +179,8 @@ async def test_reconfigure_changes_lights_and_keeps_the_player(hass: HomeAssista
     assert entry.data[CONF_LIGHTS] == [old, new]
     assert entry.data[CONF_IDENTITY] == "11" * 32  # same Music Assistant player
     assert CONF_LAYOUT not in entry.options and CONF_ZHA_GROUP_ID not in entry.options
-    assert entry.options[CONF_MATCH_ROOMS] is True
+    assert entry.options[CONF_SHOW_MODE] == "house"
+    assert entry.options[CONF_LAYOUT_SOURCE] == "manual"
 
 
 async def test_options_flow(hass: HomeAssistant) -> None:
@@ -200,16 +203,15 @@ async def test_options_flow(hass: HomeAssistant) -> None:
                 CONF_MAX_BRIGHTNESS: 40,
                 "end_delay": 10,
                 "ambient_period": 10,
-                CONF_FALLBACK_PLAYER: "media_player.node",
-                CONF_MATCH_ROOMS: False,
+                CONF_SHOW_MODE: "independent",
+                CONF_LAYOUT_SOURCE: "manual",
                 CONF_COLOR_FORMAT: "xy",
             },
         )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options[CONF_ZHA_GROUP_ID] is None
     assert entry.options[CONF_MIN_BRIGHTNESS] == 30  # forced below max
-    assert entry.options[CONF_FALLBACK_PLAYER] == "media_player.node"
-    assert entry.options[CONF_MATCH_ROOMS] is False
+    assert entry.options[CONF_SHOW_MODE] == "independent"
     assert entry.options[CONF_COLOR_FORMAT] == "xy"
 
 
@@ -236,7 +238,8 @@ async def test_options_reject_group_with_extra_members(hass: HomeAssistant) -> N
         CONF_MAX_BRIGHTNESS: 100,
         "end_delay": 10,
         "ambient_period": 10,
-        CONF_MATCH_ROOMS: True,
+        CONF_SHOW_MODE: "mirrored",
+        CONF_LAYOUT_SOURCE: "manual",
         CONF_COLOR_FORMAT: "auto",
     }
     with (
@@ -255,12 +258,12 @@ async def test_options_reject_group_with_extra_members(hass: HomeAssistant) -> N
 
 def test_rename_in_config() -> None:
     data = {CONF_LIGHTS: ["light.old", "light.b"], CONF_NAME: "K"}
-    options = {CONF_PAUSE_ENTITIES: ["automation.x"], CONF_FALLBACK_PLAYER: "media_player.old"}
+    options = {CONF_PAUSE_ENTITIES: ["automation.x"]}
     new_data, new_options = rename_in_config(data, options, "light.old", "light.new")
     assert new_data == {CONF_LIGHTS: ["light.new", "light.b"], CONF_NAME: "K"} and new_options is None
-    new_data, new_options = rename_in_config(data, options, "media_player.old", "media_player.node")
+    new_data, new_options = rename_in_config(data, options, "automation.x", "automation.y")
     assert new_data is None
-    assert new_options == {CONF_PAUSE_ENTITIES: ["automation.x"], CONF_FALLBACK_PLAYER: "media_player.node"}
+    assert new_options == {CONF_PAUSE_ENTITIES: ["automation.y"]}
     assert rename_in_config(data, options, "light.other", "light.x") == (None, None)
 
 
@@ -301,6 +304,72 @@ async def test_migration_records_the_room_area(hass: HomeAssistant) -> None:
     )
     entry.add_to_hass(hass)
     assert await async_migrate_entry(hass, entry)
-    assert entry.version == 2
+    assert entry.version == 3
     assert entry.data[CONF_AREA] == kitchen.id
     assert entry.data[CONF_IDENTITY] == "0" * 64
+    assert entry.options[CONF_SHOW_MODE] == "mirrored"
+
+
+async def test_migration_to_show_modes_drops_the_music_player(hass: HomeAssistant) -> None:
+    for match, mode in ((True, "mirrored"), (False, "independent")):
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            version=2,
+            data={**CONNECTION, CONF_NAME: "K", CONF_LIGHTS: [], CONF_IDENTITY: "00" * 32},
+            options={CONF_MATCH_ROOMS: match, "fallback_player": "media_player.node_a7d8", CONF_LAYOUT: "1, 2"},
+        )
+        entry.add_to_hass(hass)
+        assert await async_migrate_entry(hass, entry)
+        assert entry.version == 3
+        assert entry.options == {CONF_SHOW_MODE: mode, CONF_LAYOUT: "1, 2"}  # layout source: decided at setup
+
+
+async def test_new_room_starts_on_the_floor_plan_when_every_bulb_is_pinned(hass: HomeAssistant) -> None:
+    from custom_components.music_light_sync.floorplan import Pin  # noqa: PLC0415
+
+    MockConfigEntry(
+        domain=DOMAIN, version=3, data={**CONNECTION, CONF_NAME: "K", CONF_LIGHTS: [], CONF_IDENTITY: "00" * 32}
+    ).add_to_hass(hass)
+    dining = ar.async_get(hass).async_create("Dining Room")
+    lights = [
+        _bulb(hass, f"dining_{i}", f"00:00:00:00:00:00:00:0{i}", "3RCB01057Z", "Third Reality, Inc", dining.id)
+        for i in range(1, 5)
+    ]
+    devices = [er.async_get(hass).async_get(light).device_id for light in lights]
+    pins = {d: Pin(25.0 + i, 30.0, dining.id) for i, d in enumerate(devices)}
+    load = "custom_components.music_light_sync.config_flow.async_load_pins"
+    for pinned, expected in ((pins, "floor_plan"), (dict(list(pins.items())[:3]), "manual")):
+        result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_AREA: dining.id})
+        with patch(load, return_value=pinned), patch(SETUP, return_value=True):
+            result = await hass.config_entries.flow.async_configure(
+                result["flow_id"], {CONF_NAME: "Music Sync - Dining Room", CONF_LIGHTS: lights}
+            )
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        assert result["options"][CONF_LAYOUT_SOURCE] == expected
+        await hass.config_entries.async_remove(result["result"].entry_id)
+
+
+async def test_options_refuse_floor_plan_with_unpinned_bulbs(hass: HomeAssistant) -> None:
+    light = _bulb(hass, "a", "00:17:88:01:0b:00:00:01", "LCB002", "Signify Netherlands B.V.")
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=3, data={**CONNECTION, CONF_NAME: "K", CONF_LIGHTS: [light], CONF_IDENTITY: "00" * 32}
+    )
+    entry.add_to_hass(hass)
+    values = {
+        CONF_ZHA_GROUP_ID: "none",
+        "rate_max": 10,
+        "group_min_interval": 2,
+        CONF_MIN_BRIGHTNESS: 15,
+        CONF_MAX_BRIGHTNESS: 100,
+        "end_delay": 10,
+        "ambient_period": 10,
+        CONF_SHOW_MODE: "house",
+        CONF_LAYOUT_SOURCE: "floor_plan",
+        CONF_COLOR_FORMAT: "auto",
+    }
+    with patch("custom_components.music_light_sync.config_flow.async_load_pins", return_value={}):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(result["flow_id"], values)
+    assert result["errors"] == {CONF_LAYOUT_SOURCE: "not_pinned"}
+    assert result["description_placeholders"]["unpinned"] == light

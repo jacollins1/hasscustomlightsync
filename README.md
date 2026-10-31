@@ -21,7 +21,11 @@ Each **Music Light Sync** entry is one room: its own bulbs, layout, settings, an
 Rooms work together:
 
 - **Light sync players.** Music Assistant gets one **<speaker> - Light sync** player for every BluOS speaker (for example **Living Room - Light sync**): the speaker plus every light room that joined it. Play to that player and the speaker plays while the lights in those rooms run. The players follow their speakers: a new BluOS speaker gets one, a disabled speaker disables it, a removed speaker removes it. A speaker Music Assistant can't group with light players (in this house: Office and Outside) gets a player with just the speaker.
-- **Match other rooms.** Rooms with this option on that play in the same group run one show: same section, color pair, rhythm, rate and look length, changing on the same beat, each mapped onto its own bulbs and layout. Rooms with it off run their own show even when grouped.
+- **Show with other rooms** (per room, when rooms play in the same group):
+  - **House-wide:** the house-wide rooms draw one show across all their bulbs, placed by the floor plan, so a chase or wave runs from the kitchen into the dining room. It needs every bulb of those rooms pinned on the floor plan; a room that isn't fully pinned plays the shared show on its own bulbs instead. It is also the lightest on Zigbee: one show's hits instead of one per room, never more than six bulbs hit at the same instant (drops aside, which go out as one multicast per room).
+  - **Mirrored** (default): same section, color pair, rhythm, rate and look length, changing on the same beat, each room on its own bulbs.
+  - **Independent:** the room's own show, even when grouped.
+  - Shared shows count steps from the shared song, so a room that joins mid-song plays the same step of a chase as the rooms already playing.
 - **One Zigbee budget.** All rooms share one coordinator, so the frame budget is house-wide: two rooms playing get half each, not double.
 
 - **Party (lighting designer)** (default): runs the room the way a lighting operator would, following the club lighting rules below.
@@ -47,7 +51,7 @@ Rooms work together:
 - **Beat breathe:** the bulbs flash on beats 1 and 3, then fade before the next flash. Use it to calibrate the latency.
 - **Bar color shift:** every bulb changes palette color on each bar. With a ZHA group this takes one multicast frame per bar.
 - **Max reactive:** each bulb follows its own frequency band, bass on the first bulb.
-- **Ambient palette:** album-art colors drift slowly. This works without beat analysis, and through the music player (see below).
+- **Ambient palette:** album-art colors drift slowly. This works without beat analysis.
 
 ### Lighting rules built in
 
@@ -62,7 +66,7 @@ Rooms work together:
 
 ### Volume and intensity
 
-- **Following the volume.** The lights soften when you turn the music down. Volume is read from the *Music player* option and compared with the loudest setting used recently, not with a fixed number. A Node at 4 % into a loud amp counts as party volume; turning it down to half of that makes every rise take at least 0.3 s, with no flashes, and roughly halves the brightness swing. HA can't see the amplifier's own knob.
+- **Following the volume.** The lights soften when you turn the music down. Volume is read from the speaker the room is playing with (the speaker of the **- Light sync** player, from Music Assistant; the status sensor's `following_speaker` attribute names it) and compared with the loudest setting used recently, not with a fixed number. A Node at 4 % into a loud amp counts as party volume; turning it down to half of that makes every rise take at least 0.3 s, with no flashes, and roughly halves the brightness swing. HA can't see the amplifier's own knob.
 - **The Intensity control** (`number.<name>_intensity`, 10–100 %) caps the swing outright. Use about 40 % for dinner (gentle, no hard flashes below 60 %) and 100 % for a party.
 
 Timing jitter is about 50–150 ms. Zigbee allows only 10–20 frames per second before the rest of the house suffers, so this cannot match a Hue Sync Box's 25 Hz strobing.
@@ -101,7 +105,7 @@ Timing jitter is about 50–150 ms. Zigbee allows only 10–20 frames per second
 | Path | How | Audio to the Node | Lights |
 |---|---|---|---|
 | **Synced** | Play to **Living Room - Light sync** (or group **Living Room** with any room's light player by hand) | AirPlay 2, capped at 24-bit/48 kHz | All effects, beat-accurate |
-| **Native hi-res** | Play to **Living Room** alone | Native BluOS, full Tidal resolution | Optional: the Ambient palette from album art, via the fallback player |
+| **Native hi-res** | Play to **Living Room** alone | Native BluOS, full Tidal resolution | Off: the room's lights are left alone |
 
 The **Sync** switch arms the integration. While it is on and Music Assistant streams to the group:
 
@@ -115,11 +119,11 @@ If Home Assistant stops, the integration hands back first. If it crashes or lose
 
 | Option | Recommendation |
 |---|---|
-| Bulb layout | Where each bulb is in the room: one `x, y` line per bulb, 0–100 across and down as seen from above. Start a line with the bulb's entity id (`light.x: 22, 29`) so the order of the *Lights* list doesn't matter, or with its number in that list (`3: 76, 72`); lines without either fill the remaining bulbs in *Lights* order. Party mode builds its pairs, splits and chase paths from it. Without a layout the bulbs are treated as a row. The kitchen is below. |
-| Music player | The room's Music Assistant player, e.g. `media_player.node_a7d8`. Party mode reads the volume, the time left in the track (for the outro) and track changes from it; the native hi-res path uses it for the ambient palette. |
+| Bulb positions from | **Floor plan**: each bulb where it is pinned on the floor plan dashboard (`floorplan-positions`), re-read whenever the plan is saved. **Manual**: the layout text below. A new room starts on the floor plan when every bulb is pinned, otherwise on Manual; a Manual room switches to the floor plan by itself as soon as its last bulb is pinned. A pin made while the bulb's device was in another area doesn't count. The status sensor shows `layout` (floor plan / manual / row) and `unpinned_bulbs`. |
+| Bulb layout (manual) | Used with Manual. Where each bulb is in the room: one `x, y` line per bulb, 0–100 across and down as seen from above. Start a line with the bulb's entity id (`light.x: 22, 29`) so the order of the *Lights* list doesn't matter, or with its number in that list (`3: 76, 72`); lines without either fill the remaining bulbs in *Lights* order. Party mode builds its pairs, splits and chase paths from it. Without a layout the bulbs are treated as a row. The kitchen is below. |
 | ZHA group | Recommended. In ZHA, create a group with exactly this room's bulbs and pick it here. Whole-room changes (a drop's white flash) then take one multicast frame instead of one per bulb, which keeps drops on time. The option is refused if the group has other members. |
 | Light sync speakers | Which speakers' **- Light sync** players this room joins. All ticked (the default) also joins speakers added later. |
-| Match other rooms | On (default): run one show with other matching rooms in the same group. |
+| When this room plays with other rooms | House-wide, Mirrored (default) or Independent; see *Show with other rooms* above. |
 | Color format | Automatic: each bulb gets its native format (Hue: CIE xy; Third Reality: hue/saturation, the same thing its *Native hue/saturation color* quirk switch does). Nothing on the bulbs is switched during a show, so there is nothing to put back. If Hue and Third Reality bulbs don't match side by side, force **Hue/saturation for every bulb** or **CIE xy for every bulb**. A ZHA group mixing formats sends colors bulb by bulb. |
 | Zigbee frame budget | 20 frames/s for the whole house (the default). Rooms playing at the same time share it; the lowest value set in any room applies. The governor backs off by itself if the mesh gets congested. |
 | Min. group spacing | 2 s. Multicast frames fill the coordinator's broadcast table, so don't go lower. |
@@ -128,7 +132,7 @@ If Home Assistant stops, the integration hands back first. If it crashes or lose
 | Pause during a show | Other automations that would fight the show, e.g. the room's occupancy and illuminance automations. |
 | Restore after | 10 s |
 
-Kitchen layout (1 top center, 2 left upper, 3 right middle, 4 left lower, 5 right bottom; assumes the *Lights* list is in that order):
+Manual layouts used before the floor plan (both rooms are on the floor plan now). Kitchen (1 top center, 2 left upper, 3 right middle, 4 left lower, 5 right bottom; assumes the *Lights* list is in that order):
 
 ```
 43, 13

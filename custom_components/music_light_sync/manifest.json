@@ -5,7 +5,8 @@
     "zha",
     "group",
     "music_assistant",
-    "media_player"
+    "media_player",
+    "lovelace"
   ],
   "codeowners": [],
   "config_flow": true,
@@ -19,5 +20,5 @@
   "requirements": [
     "aiosendspin==10.2.0"
   ],
-  "version": "0.3.2"
+  "version": "0.3.3"
 }

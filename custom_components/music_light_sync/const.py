@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Final
 
 DOMAIN: Final = "music_light_sync"
-VERSION: Final = "0.3.2"
+VERSION: Final = "0.3.3"
 
 # Config entry data
 CONF_HOST: Final = "host"
@@ -21,18 +21,26 @@ CONF_RATE_MAX: Final = "rate_max"
 CONF_GROUP_MIN_INTERVAL: Final = "group_min_interval"
 CONF_MIN_BRIGHTNESS: Final = "min_brightness"
 CONF_MAX_BRIGHTNESS: Final = "max_brightness"
-CONF_FALLBACK_PLAYER: Final = "fallback_player"
+CONF_FALLBACK_PLAYER: Final = "fallback_player"  # removed in 0.3.3 (migration only)
 CONF_PAUSE_ENTITIES: Final = "pause_entities"
 CONF_END_DELAY: Final = "end_delay"
 CONF_AMBIENT_PERIOD: Final = "ambient_period"
 CONF_LAYOUT: Final = "layout"
-CONF_MATCH_ROOMS: Final = "match_rooms"  # share one show with other matching rooms in the same group
+CONF_MATCH_ROOMS: Final = "match_rooms"  # replaced by show_mode in 0.3.3 (migration only)
+CONF_SHOW_MODE: Final = "show_mode"  # house | mirrored | independent
+CONF_LAYOUT_SOURCE: Final = "layout_source"  # floor_plan | manual
 CONF_COLOR_FORMAT: Final = "color_format"  # auto | hs | xy
 CONF_PAUSE_ADAPTIVE: Final = "pause_adaptive_lighting"  # pause the room's Adaptive Lighting switches
 CONF_SPEAKERS: Final = "light_sync_speakers"  # BluOS players whose Light sync group this room joins
 
 COLOR_FORMAT_AUTO: Final = "auto"
-DEFAULT_MATCH_ROOMS: Final = True
+SHOW_HOUSE: Final = "house"  # rooms playing together draw one show across all their bulbs
+SHOW_MIRRORED: Final = "mirrored"  # same show, each room on its own bulbs
+SHOW_INDEPENDENT: Final = "independent"  # the room's own show
+SHOW_MODES: Final = (SHOW_HOUSE, SHOW_MIRRORED, SHOW_INDEPENDENT)
+DEFAULT_SHOW_MODE: Final = SHOW_MIRRORED
+LAYOUT_FLOOR_PLAN: Final = "floor_plan"
+LAYOUT_MANUAL: Final = "manual"
 DEFAULT_PAUSE_ADAPTIVE: Final = True
 LIGHT_SYNC_SUFFIX: Final = " - Light sync"
 

@@ -21,13 +21,12 @@ from .const import (
     CONF_AREA,
     CONF_COLOR_FORMAT,
     CONF_END_DELAY,
-    CONF_FALLBACK_PLAYER,
     CONF_GROUP_MIN_INTERVAL,
     CONF_HOST,
     CONF_IDENTITY,
     CONF_LAYOUT,
+    CONF_LAYOUT_SOURCE,
     CONF_LIGHTS,
-    CONF_MATCH_ROOMS,
     CONF_MAX_BRIGHTNESS,
     CONF_MIN_BRIGHTNESS,
     CONF_NAME,
@@ -35,21 +34,34 @@ from .const import (
     CONF_PAUSE_ENTITIES,
     CONF_PORT,
     CONF_RATE_MAX,
+    CONF_SHOW_MODE,
     CONF_SPEAKERS,
     CONF_ZHA_GROUP_ID,
     DEFAULT_AMBIENT_PERIOD,
     DEFAULT_END_DELAY,
     DEFAULT_GROUP_MIN_INTERVAL,
-    DEFAULT_MATCH_ROOMS,
     DEFAULT_MAX_BRIGHTNESS,
     DEFAULT_MIN_BRIGHTNESS,
     DEFAULT_PAUSE_ADAPTIVE,
     DEFAULT_PORT,
     DEFAULT_RATE_MAX,
+    DEFAULT_SHOW_MODE,
     DOMAIN,
+    LAYOUT_FLOOR_PLAN,
+    LAYOUT_MANUAL,
+    SHOW_MODES,
 )
+from .floorplan import async_load_pins, room_positions
 from .sendspin_link import client_id_for, new_identity_hex
-from .zigbee import COLOR_HS, COLOR_XY, SUPPORTED_MODELS, BulbResolveError, resolve_bulbs, unsupported_models
+from .zigbee import (
+    COLOR_HS,
+    COLOR_XY,
+    SUPPORTED_MODELS,
+    BulbResolveError,
+    expand_lights,
+    resolve_bulbs,
+    unsupported_models,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -99,6 +111,16 @@ def _lights_in_area(hass: HomeAssistant, area_id: str) -> list[str]:
     return sorted(dict.fromkeys(found))
 
 
+async def async_layout_source(hass: HomeAssistant, light_ids: list[str]) -> str:
+    """Floor plan when every bulb is pinned on it, else manual."""
+    try:
+        lights = expand_lights(hass, light_ids)
+    except BulbResolveError:
+        return LAYOUT_MANUAL
+    positions, _missing = room_positions(hass, await async_load_pins(hass), lights)
+    return LAYOUT_FLOOR_PLAN if positions is not None else LAYOUT_MANUAL
+
+
 def default_room_name(area_name: str) -> str:
     """ "Dining Room" -> "Music Sync - Dining Room" (entry title and Music Assistant player)."""
     return f"Music Sync - {area_name}"
@@ -119,11 +141,12 @@ def _room_schema(defaults: dict[str, Any], *, with_area: bool) -> vol.Schema:
 class MusicLightSyncConfigFlow(ConfigFlow, domain=DOMAIN):
     """One entry per room: its bulbs, its Music Assistant player, its show."""
 
-    VERSION = 2
+    VERSION = 3
 
     def __init__(self) -> None:
         self._room: dict[str, Any] = {}
         self._warned: list[str] = []
+        self._layout_source = LAYOUT_MANUAL
 
     def _connection(self) -> dict[str, Any] | None:
         """Music Assistant host/port of an existing room, so new rooms needn't ask."""
@@ -227,7 +250,11 @@ class MusicLightSyncConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_create_entry(
             title=self._room[CONF_NAME],
             data={**self._room, CONF_IDENTITY: identity},
-            options={CONF_MATCH_ROOMS: DEFAULT_MATCH_ROOMS, CONF_COLOR_FORMAT: COLOR_FORMAT_AUTO},
+            options={
+                CONF_SHOW_MODE: DEFAULT_SHOW_MODE,
+                CONF_COLOR_FORMAT: COLOR_FORMAT_AUTO,
+                CONF_LAYOUT_SOURCE: await async_layout_source(self.hass, self._room[CONF_LIGHTS]),
+            },
         )
 
     async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
@@ -240,6 +267,7 @@ class MusicLightSyncConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors[CONF_AREA] = "area_taken"
             elif (room := self._check_room(area, user_input, errors)) is not None:
                 self._room = room
+                self._layout_source = await async_layout_source(self.hass, room[CONF_LIGHTS])
                 if self._warned:
                     return await self.async_step_unsupported()
                 return self._async_apply_reconfigure()
@@ -258,6 +286,7 @@ class MusicLightSyncConfigFlow(ConfigFlow, domain=DOMAIN):
         if self._room[CONF_LIGHTS] != entry.data.get(CONF_LIGHTS):
             options.pop(CONF_LAYOUT, None)  # positions belonged to the old bulbs
             options.pop(CONF_ZHA_GROUP_ID, None)
+            options[CONF_LAYOUT_SOURCE] = self._layout_source
         return self.async_update_reload_and_abort(
             entry, title=self._room[CONF_NAME], data_updates=self._room, options=options
         )
@@ -340,6 +369,7 @@ class MusicLightSyncOptionsFlow(OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Single options page."""
         errors: dict[str, str] = {}
+        placeholders: dict[str, str] = {"unpinned": ""}
         if user_input is not None:
             data = dict(user_input)
             group = data.pop(CONF_ZHA_GROUP_ID, NO_GROUP)
@@ -351,7 +381,11 @@ class MusicLightSyncOptionsFlow(OptionsFlow):
             if data[CONF_MIN_BRIGHTNESS] >= data[CONF_MAX_BRIGHTNESS]:
                 data[CONF_MIN_BRIGHTNESS] = max(1, data[CONF_MAX_BRIGHTNESS] - 10)
             layout_error = _layout_error(self.hass, data.get(CONF_LAYOUT), self.config_entry.data[CONF_LIGHTS])
-            if layout_error:
+            unpinned = await self._unpinned() if data.get(CONF_LAYOUT_SOURCE) == LAYOUT_FLOOR_PLAN else []
+            if unpinned:
+                errors[CONF_LAYOUT_SOURCE] = "not_pinned"
+                placeholders["unpinned"] = ", ".join(unpinned)
+            elif layout_error:
                 errors[CONF_LAYOUT] = layout_error
             elif data[CONF_ZHA_GROUP_ID] is not None and (
                 problem := _group_mismatch(self.hass, data[CONF_ZHA_GROUP_ID], self.config_entry.data[CONF_LIGHTS])
@@ -391,8 +425,12 @@ class MusicLightSyncOptionsFlow(OptionsFlow):
         fields[vol.Required(CONF_PAUSE_ADAPTIVE, default=opts.get(CONF_PAUSE_ADAPTIVE, DEFAULT_PAUSE_ADAPTIVE))] = (
             selector.BooleanSelector()
         )
-        fields[vol.Required(CONF_MATCH_ROOMS, default=opts.get(CONF_MATCH_ROOMS, DEFAULT_MATCH_ROOMS))] = (
-            selector.BooleanSelector()
+        fields[vol.Required(CONF_SHOW_MODE, default=opts.get(CONF_SHOW_MODE, DEFAULT_SHOW_MODE))] = (
+            selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=list(SHOW_MODES), translation_key=CONF_SHOW_MODE, mode=selector.SelectSelectorMode.LIST
+                )
+            )
         )
         fields[vol.Required(CONF_COLOR_FORMAT, default=opts.get(CONF_COLOR_FORMAT, COLOR_FORMAT_AUTO))] = (
             selector.SelectSelector(
@@ -415,12 +453,27 @@ class MusicLightSyncOptionsFlow(OptionsFlow):
                     )
                 )
             )
+        fields[vol.Required(CONF_LAYOUT_SOURCE, default=opts.get(CONF_LAYOUT_SOURCE, LAYOUT_MANUAL))] = (
+            selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[LAYOUT_FLOOR_PLAN, LAYOUT_MANUAL],
+                    translation_key=CONF_LAYOUT_SOURCE,
+                    mode=selector.SelectSelectorMode.LIST,
+                )
+            )
+        )
         layout = opts.get(CONF_LAYOUT)
         fields[vol.Optional(CONF_LAYOUT, description={"suggested_value": layout} if layout else None)] = (
             selector.TextSelector(selector.TextSelectorConfig(multiline=True))
         )
-        player = opts.get(CONF_FALLBACK_PLAYER)
-        fields[vol.Optional(CONF_FALLBACK_PLAYER, description={"suggested_value": player} if player else None)] = (
-            selector.EntitySelector(selector.EntitySelectorConfig(domain="media_player"))
+        return self.async_show_form(
+            step_id="init", data_schema=vol.Schema(fields), errors=errors, description_placeholders=placeholders
         )
-        return self.async_show_form(step_id="init", data_schema=vol.Schema(fields), errors=errors)
+
+    async def _unpinned(self) -> list[str]:
+        try:
+            lights = expand_lights(self.hass, list(self.config_entry.data[CONF_LIGHTS]))
+        except BulbResolveError:
+            return []
+        _positions, missing = room_positions(self.hass, await async_load_pins(self.hass), lights)
+        return missing

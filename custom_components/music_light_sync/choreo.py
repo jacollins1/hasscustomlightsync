@@ -375,6 +375,17 @@ def frames_per_beat(spec: LookSpec, rate: str, bulbs: int, groups: int, energy: 
 HOUSE_SLOTS = 6
 
 
+def event_offsets(rate: str, beat: BeatInfo) -> list[int]:
+    """When, within a beat, a look at this rate plays (microseconds after the beat)."""
+    if rate == "eighth":
+        return [0, beat.interval // 2]
+    if rate == "beat":
+        return [0]
+    if rate == "half":
+        return [0] if beat.position % 2 == 0 else []
+    return [0] if beat.position == 0 else []
+
+
 @dataclass(frozen=True, slots=True)
 class LookCue:
     """A look as the director decides it, before any room maps it onto its bulbs."""
@@ -401,15 +412,19 @@ class BeatCue:
     next_look: LookCue | None  # prepared on this beat for the next bar
     energy: float
     build_bars: int
+    events: int = 0  # events the look has played before this beat (same for every room)
 
 
 @dataclass(slots=True)
 class RoomInfo:
-    """What the director needs to know about a room to pick looks every room can play."""
+    """What the director needs to know about a room to pick looks every room can play.
+
+    A house-wide show is one entry covering several rooms (``rooms``)."""
 
     layout: Layout
     bulbs: int
     budget_per_s: float
+    rooms: int = 1
 
 
 class Director:
@@ -428,6 +443,7 @@ class Director:
         self.track_remaining_s: float | None = None
         self.rooms: dict[object, RoomInfo] = {}
         self._cue_id = 0
+        self._look_events = 0
         self._beats_since_reset = RESET_SETTLE_BEATS
         self.reset(force=True)
 
@@ -497,6 +513,10 @@ class Director:
         prepared = None
         if beat.next_is_bar and self._bars_done + 1 >= self._look.bars and self._next is None:
             self._next = prepared = self._new_cue(beat)
+        if started:
+            self._look_events = 0
+        events = self._look_events
+        self._look_events += len(event_offsets(self._look.rate, beat))
         return BeatCue(
             beat.ts,
             self.section,
@@ -507,6 +527,7 @@ class Director:
             prepared,
             self._energy,
             self._build_bars,
+            events,
         )
 
     def _on_bar(self, beat: BeatInfo) -> bool:
@@ -635,7 +656,7 @@ class Director:
         """Every room in the show can play this grouping kind, and together they fit the air."""
         if not all(grouping_options(r.layout, r.bulbs, spec, kind) for r in self.rooms.values()):
             return False
-        if len(self.rooms) < 2 or spec.rhythm == "impact":
+        if sum(r.rooms for r in self.rooms.values()) < 2 or spec.rhythm == "impact":
             return True  # one room always fits; the drop's impact is worth a late bulb
         at_once = sum(
             bulbs_at_once(spec, r.bulbs, r.bulbs if kind == "solo" else TYPICAL_GROUPS.get(kind, 2), self._energy)
@@ -648,7 +669,7 @@ class Director:
         specs = [s for s in section_looks if s.rhythm not in self._recent] or section_looks
         fallback = (
             LookSpec("chase", ("half", "bar"), ("order",), (2, 2), 1)  # one bulb per room at a time
-            if len(self.rooms) > 1
+            if sum(r.rooms for r in self.rooms.values()) > 1
             else LookSpec("unison", ("half", "bar"), ("all",), (1, 2), 1)
         )
         specs = [s for s in specs if any(self._playable(s, g) for g in s.groupings)] or [fallback]
@@ -686,11 +707,17 @@ class Choreographer:
         seed: int | None = None,
         layout: list[tuple[float, float]] | None = None,
     ) -> None:
-        self.bulbs = bulbs
+        self.room_bulbs = bulbs  # this room's own bulbs
+        self.bulbs = bulbs  # bulbs the show is drawn on (the whole canvas in a house-wide show)
         self.min_level = min_level
         self.max_level = max_level
         self._rng = random.Random(seed)
-        self.layout = Layout.build(layout if layout and len(layout) == bulbs else default_layout(bulbs))
+        self.room_layout = Layout.build(layout if layout and len(layout) == bulbs else default_layout(bulbs))
+        self.layout = self.room_layout
+        # House-wide show: the canvas key, and canvas bulb -> this room's bulb.
+        self._canvas: object | None = None
+        self._canvas_rooms = 1
+        self._own: dict[int, int] | None = None
         self.volume: float | None = None  # 0..1 from the music player, None = unknown
         self.intensity = 1.0  # the Intensity control, 0.1..1
         self._volume_ref: float | None = None  # the loudest recent setting = "party volume"
@@ -706,9 +733,57 @@ class Choreographer:
         director = director or self._own_director
         if director is self.director:
             return
-        self.director.remove_room(self)
+        self.director.remove_room(self._room_key)
         self.director = director
         self._room_reset()
+
+    @property
+    def _room_key(self) -> object:
+        return self._canvas if self._canvas is not None else self
+
+    def set_layout(self, layout: list[tuple[float, float]] | None) -> None:
+        """This room's bulb positions (e.g. re-read from the floor plan)."""
+        positions = layout if layout and len(layout) == self.room_bulbs else default_layout(self.room_bulbs)
+        self.room_layout = Layout.build(positions)
+        if self._canvas is None:
+            self.layout = self.room_layout
+
+    def use_canvas(
+        self, key: object | None, positions: list[tuple[float, float]] | None = None, own: list[int] | None = None
+    ) -> None:
+        """Draw the show on several rooms' bulbs at once (a house-wide show).
+
+        ``positions`` are every bulb of the canvas (all rooms, one coordinate
+        frame), ``own[i]`` the canvas index of this room's bulb ``i``. Every room
+        on the canvas computes the same show from the shared director and sends
+        only its own bulbs. ``key=None`` goes back to the room's own bulbs.
+        """
+        if key is None or not positions or not own:
+            if self._canvas is None:
+                return
+            self.director.remove_room(self._canvas)
+            self._canvas, self._own, self._canvas_rooms = None, None, 1
+            self.bulbs, self.layout = self.room_bulbs, self.room_layout
+        else:
+            if (
+                self._canvas == key
+                and self._own == {c: i for i, c in enumerate(own)}
+                and positions == self.layout.positions
+            ):
+                return
+            self.director.remove_room(self._room_key)
+            self._canvas = key
+            self._own = {c: i for i, c in enumerate(own)}
+            self.bulbs = len(positions)
+            self.layout = Layout.build(positions)
+        self._room_reset()
+
+    @property
+    def on_canvas(self) -> bool:
+        return self._canvas is not None
+
+    def set_canvas_rooms(self, rooms: int) -> None:
+        self._canvas_rooms = max(1, rooms)
 
     @property
     def section(self) -> Section:
@@ -791,6 +866,10 @@ class Choreographer:
         rng = random.Random(cue.seed)
         spec = cue.spec
         options = grouping_options(self.layout, self.bulbs, spec, cue.kind) or self.layout.groupings["all"]
+        if self._canvas is not None and spec.rhythm in ("call_response", "canon", "hold_play"):
+            # Across rooms a group can be large (a 7 + 2 split of nine bulbs): keep
+            # the bulbs hit together within what the house can have in the air.
+            options = [g for g in options if max(len(x) for x in g) <= HOUSE_SLOTS] or options
         groups = [list(g) for g in rng.choice(options)]
         order = list(rng.choice(self.layout.orders))
         pair = cue.pair
@@ -817,7 +896,8 @@ class Choreographer:
         """Commands for one beat (some take effect later within the beat)."""
         out: list[Command] = []
         self.budget_per_s = beat.budget_per_s
-        self.director.update_room(self, RoomInfo(self.layout, self.bulbs, beat.budget_per_s))
+        rooms = self._canvas_rooms if self._canvas is not None else 1
+        self.director.update_room(self._room_key, RoomInfo(self.layout, self.bulbs, beat.budget_per_s * rooms, rooms))
         cue = self.director.cue(beat)
         if beat.bar_start and self._volume_ref is not None:
             self._volume_ref *= 0.9995  # halves over ~1400 bars (~45 min)
@@ -827,8 +907,10 @@ class Choreographer:
         look = self.look
         assert look is not None
         look.bars_done = cue.bars_done
+        if self._look_id == cue.look.id:
+            look.events = cue.events  # rooms that joined late stay in step
 
-        for offset in self._event_offsets(look.rate, beat):
+        for offset in event_offsets(look.rate, beat):
             self._play(look, beat, beat.ts + offset, out)
             look.events += 1
 
@@ -844,7 +926,14 @@ class Choreographer:
         for cmd in out:
             latest.pop((cmd.key, cmd.effect_us), None)
             latest[(cmd.key, cmd.effect_us)] = cmd
-        return list(latest.values())
+        result = list(latest.values())
+        if self._own is not None:
+            # House-wide: keep this room's bulbs, numbered as the room knows them.
+            own = self._own
+            result = [cmd for cmd in result if cmd.target in own]
+            for cmd in result:
+                cmd.target = own[cmd.target]
+        return result
 
     def _start_look(self, cue: BeatCue, beat: BeatInfo, out: list[Command]) -> None:
         first = self.look is None
@@ -868,13 +957,7 @@ class Choreographer:
 
     @staticmethod
     def _event_offsets(rate: str, beat: BeatInfo) -> list[int]:
-        if rate == "eighth":
-            return [0, beat.interval // 2]
-        if rate == "beat":
-            return [0]
-        if rate == "half":
-            return [0] if beat.position % 2 == 0 else []
-        return [0] if beat.position == 0 else []
+        return event_offsets(rate, beat)
 
     def _event_gap(self, look: Look, beat: BeatInfo) -> int:
         return int(beat.interval / RATES[look.rate])
@@ -965,7 +1048,9 @@ class Choreographer:
         elif rhythm == "sparkle":
             hits = 2 if self._energy > 0.7 else 1
             choices = [b for b in range(self.bulbs) if b not in self._last_sparkle] or list(range(self.bulbs))
-            picked = self._rng.sample(choices, min(hits, len(choices)))
+            # Seeded by the look and the event, so every room on a shared show picks alike.
+            rng = random.Random(hash((self._look_id, e)))
+            picked = rng.sample(choices, min(hits, len(choices)))
             for bulb in picked:
                 self._hit(bulb, ts, gap, out)
             self._last_sparkle = set(picked)

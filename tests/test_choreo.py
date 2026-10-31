@@ -439,3 +439,120 @@ def test_shared_director_ignores_a_second_rooms_reset() -> None:
     bars = director._bar_count  # noqa: SLF001
     b.reset()  # ...and a second later by the dining room: no second restart
     assert director._bar_count == bars  # noqa: SLF001
+
+
+# --------------------------------------------------------------- house-wide shows
+
+# Floor plan feet (house frame), as pinned in the house on 2026-10-31.
+KITCHEN_FT = [(9.24, 44.67), (11.55, 47.24), (12.42, 43.96), (16.27, 47.57), (17.09, 44.22)]
+DINING_FT = [(25.02, 30.07), (32.18, 30.28), (32.62, 36.41), (25.16, 36.34)]
+
+
+def _song_beats(count: int = 256):
+    from custom_components.music_light_sync.choreo import BeatInfo  # noqa: PLC0415
+
+    ts = 0
+    for i in range(count):
+        db = -20.0 if i < 64 else (-14 + (i - 64) / 16 if i < 128 else -6.0)  # intro, build, drop
+        yield BeatInfo(ts, 468_750, i % 4, 4, i % 4 == 0, i % 4 == 3, db)
+        ts += 468_750
+
+
+def test_house_wide_rooms_draw_one_show_across_both_rooms() -> None:
+    """Each room computes the whole-house show and sends its own bulbs: together
+    they send exactly what one room holding all nine bulbs would."""
+    from custom_components.music_light_sync.choreo import Choreographer, Director  # noqa: PLC0415
+
+    canvas = KITCHEN_FT + DINING_FT
+    key = ("house", "living-room-light-sync")
+    director = Director(seed=7)
+    kitchen = Choreographer(5, 10, 254, seed=1, layout=KITCHEN_FT)
+    dining = Choreographer(4, 10, 254, seed=2, layout=DINING_FT)
+    reference = Choreographer(9, 10, 254, seed=3, layout=canvas)
+    for room, own in ((kitchen, list(range(5))), (dining, list(range(5, 9))), (reference, list(range(9)))):
+        room.use_director(director)
+        room.use_canvas(key, canvas, own)
+        room.set_canvas_rooms(2)
+    walking = 0
+    for beat in _song_beats():
+        mine = [(c.effect_us, c.target, c.level, c.rgb) for c in kitchen.on_beat(beat)]
+        mine += [(c.effect_us, c.target + 5, c.level, c.rgb) for c in dining.on_beat(beat)]
+        whole = [(c.effect_us, c.target, c.level, c.rgb) for c in reference.on_beat(beat)]
+        assert sorted(mine, key=str) == sorted(whole, key=str)
+        walking += kitchen.look.rhythm in ("chase", "comet", "bounce", "wave")
+    assert walking  # some looks walk across the house
+
+
+def test_a_room_joining_late_is_in_step() -> None:
+    """Event counts come from the shared director, so a room that joins mid-look
+    plays the same step of a chase as the room already playing."""
+    from custom_components.music_light_sync.choreo import Choreographer, Director  # noqa: PLC0415
+
+    director = Director(seed=3)
+    first = Choreographer(4, 10, 254, seed=1, layout=DINING_FT)
+    late = Choreographer(4, 10, 254, seed=2, layout=DINING_FT)
+    first.use_director(director)
+    beats = list(_song_beats(96))
+    for beat in beats[:45]:
+        first.on_beat(beat)
+    late.use_director(director)
+    compared = 0
+    for beat in beats[45:]:
+        a = {(c.effect_us, c.target) for c in first.on_beat(beat) if c.level and c.level > 200}
+        b = {(c.effect_us, c.target) for c in late.on_beat(beat) if c.level and c.level > 200}
+        if a or b:
+            compared += 1
+            assert a == b  # the same bulbs hit at the same instants
+    assert compared > 20
+
+
+def test_leaving_the_house_wide_show_returns_to_the_room() -> None:
+    from custom_components.music_light_sync.choreo import Choreographer  # noqa: PLC0415
+
+    room = Choreographer(4, 10, 254, layout=DINING_FT)
+    room.use_canvas(("house", "g"), KITCHEN_FT + DINING_FT, [5, 6, 7, 8])
+    assert room.on_canvas and room.bulbs == 9
+    for beat in _song_beats(16):
+        assert all(0 <= c.target < 4 for c in room.on_beat(beat))
+    room.use_canvas(None)
+    assert not room.on_canvas and room.bulbs == 4
+    for beat in _song_beats(16):
+        assert all(0 <= c.target < 4 for c in room.on_beat(beat))
+
+
+def test_house_wide_show_is_lighter_on_zigbee_than_mirrored() -> None:
+    """One show across the house: no more hits in the air at once than the house
+    allows (drops aside, which go out as multicast), and fewer frames than two
+    mirrored rooms."""
+    import collections  # noqa: PLC0415
+
+    from custom_components.music_light_sync.choreo import HOUSE_SLOTS, Choreographer, Director  # noqa: PLC0415
+    from custom_components.music_light_sync.model import PRIO_BEAT  # noqa: PLC0415
+
+    def run(house: bool, seed: int) -> tuple[int, int]:
+        director = Director(seed=seed)
+        rooms = [
+            Choreographer(5, 10, 254, seed=1, layout=KITCHEN_FT),
+            Choreographer(4, 10, 254, seed=2, layout=DINING_FT),
+        ]
+        for room, own in zip(rooms, (range(5), range(5, 9)), strict=True):
+            room.use_director(director)
+            if house:
+                room.use_canvas("h", KITCHEN_FT + DINING_FT, list(own))
+                room.set_canvas_rooms(2)
+        frames, worst = 0, 0
+        for beat in _song_beats(384):
+            cmds = [c for room in rooms for c in room.on_beat(beat)]
+            frames += len(cmds)
+            if rooms[0].look.rhythm != "impact":
+                at_once = collections.Counter(
+                    c.effect_us for c in cmds if c.priority == PRIO_BEAT and c.level is not None
+                )
+                worst = max(worst, *at_once.values(), 0)
+        return frames, worst
+
+    for seed in range(4):
+        house_frames, house_worst = run(True, seed)
+        mirrored_frames, _ = run(False, seed)
+        assert house_worst <= HOUSE_SLOTS
+        assert house_frames < mirrored_frames
