@@ -324,35 +324,120 @@ class Look:
         return self.colors[0]
 
 
-class Choreographer:
-    """Decides, beat by beat, what every bulb does."""
+# ------------------------------------------------------------------- director
 
-    def __init__(
-        self,
-        bulbs: int,
-        min_level: int,
-        max_level: int,
-        seed: int | None = None,
-        layout: list[tuple[float, float]] | None = None,
-    ) -> None:
-        self.bulbs = bulbs
-        self.min_level = min_level
-        self.max_level = max_level
+TYPICAL_GROUPS = {"all": 1, "k2": 2, "k3": 3, "center": 2, "order": 2}
+RESET_SETTLE_BEATS = 8  # a shared director ignores further resets this soon after one
+
+
+def grouping_options(layout: Layout, bulbs: int, spec: LookSpec, kind: str) -> list[list[list[int]]]:
+    """The concrete groupings a room's layout offers for a look's grouping kind."""
+    if kind == "order":
+        return [[list(range(bulbs))]] if bulbs >= 2 else []
+    options = layout.groupings.get(kind, [])
+    if spec.rhythm in ("call_response", "hold_play", "canon"):
+        options = [g for g in options if len(g) >= 2]
+    if spec.rhythm == "canon":
+        options = [g for g in options if len(g) >= 3]
+    return options
+
+
+def bulbs_at_once(spec: LookSpec, bulbs: int, groups: int, energy: float) -> float:
+    """How many bulbs a look changes at the same instant (one frame each)."""
+    n = bulbs
+    k = max(1, groups)
+    return {
+        "unison": n,
+        "impact": n,
+        "call_response": n / k,
+        "canon": n / k,
+        "hold_play": (n - n / k) / max(1, k - 1),
+        "chase": 1,
+        "bounce": 1,
+        "comet": 1,
+        "sparkle": 2 if energy > 0.7 else 1,
+        "wave": n,
+        "swell": n,
+        "spotlight": n,
+        "build_add": n * 0.7,
+    }.get(spec.rhythm, n)
+
+
+def frames_per_beat(spec: LookSpec, rate: str, bulbs: int, groups: int, energy: float) -> float:
+    """Zigbee frames a look costs per beat in a room of ``bulbs`` split into ``groups``."""
+    per_bulb = _FRAMES_PER_BULB.get(spec.rhythm, 2)
+    return RATES[rate] * bulbs_at_once(spec, bulbs, groups, energy) * per_bulb
+
+
+# Frames the house can have in the air at once (the governor's in-flight limit).
+# Rooms matching each other hit on the same instant, so their looks together
+# must not need more than this, or the extra hits arrive late and are dropped.
+HOUSE_SLOTS = 6
+
+
+@dataclass(frozen=True, slots=True)
+class LookCue:
+    """A look as the director decides it, before any room maps it onto its bulbs."""
+
+    id: int
+    spec: LookSpec
+    kind: str  # grouping kind ("all", "pairs", "k2", ...)
+    rate: str
+    bars: int
+    seed: int
+    pair: tuple[RGB, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BeatCue:
+    """What the director decided for one beat; the same object for every room."""
+
+    ts: int
+    section: Section
+    look: LookCue
+    look_started: bool  # this beat opens the look
+    first: bool  # first look since a reset
+    bars_done: int
+    next_look: LookCue | None  # prepared on this beat for the next bar
+    energy: float
+    build_bars: int
+
+
+@dataclass(slots=True)
+class RoomInfo:
+    """What the director needs to know about a room to pick looks every room can play."""
+
+    layout: Layout
+    bulbs: int
+    budget_per_s: float
+
+
+class Director:
+    """The song-level half of the lighting designer.
+
+    It reads the music (energy, sections, drops), picks the color pair and the
+    look (rhythm, grouping kind, rate, length) bar by bar. Rooms map each look
+    onto their own bulbs. A room normally has its own director; rooms set to
+    match each other share one while they play in the same group, so they
+    change color, rhythm, rate and section on the same beat.
+    """
+
+    def __init__(self, seed: int | None = None) -> None:
         self._rng = random.Random(seed)
-        self.layout = Layout.build(layout if layout and len(layout) == bulbs else default_layout(bulbs))
         self._album_hues: list[float] = []
-        self.volume: float | None = None  # 0..1 from the music player, None = unknown
-        self.intensity = 1.0  # the Intensity control, 0.1..1
-        self._volume_ref: float | None = None  # the loudest recent setting = "party volume"
         self.track_remaining_s: float | None = None
-        self.reset()
+        self.rooms: dict[object, RoomInfo] = {}
+        self._cue_id = 0
+        self._beats_since_reset = RESET_SETTLE_BEATS
+        self.reset(force=True)
 
     # ----------------------------------------------------------- inputs
 
-    def reset(self) -> None:
-        """New song or seek: start the story over."""
-        self.look: Look | None = None
-        self._next: Look | None = None
+    def reset(self, *, force: bool = False) -> None:
+        """New song or seek: start the story over (once, however many rooms ask)."""
+        if not force and self._beats_since_reset < RESET_SETTLE_BEATS and len(self.rooms) > 1:
+            return
+        self._beats_since_reset = 0
         self.section = Section.WARMUP
         self._section_bars = 0
         self._bar_count = 0
@@ -366,50 +451,95 @@ class Choreographer:
         self._pair: tuple[RGB, ...] = MOOD_PAIRS["moody"][0]
         self._last_pair: tuple[RGB, ...] | None = None
         self._build_bars = 0
-        self._level: list[int | None] = [None] * self.bulbs
-        self._color: list[RGB | None] = [None] * self.bulbs
-        self._room_flashes: deque[int] = deque(maxlen=32)
-        self._bulb_flash: list[int | None] = [None] * self.bulbs
-        self._last_sparkle: set[int] = set()
+        self._look: LookCue | None = None
+        self._next: LookCue | None = None
+        self._bars_done = 0
+        self._cues: deque[BeatCue] = deque(maxlen=8)
 
     def set_palette(self, colors: list[RGB]) -> None:
         """Album-art colors: used to bias which mood pair is picked."""
         self._album_hues = [hue_of(c) for c in colors[:3]]
 
-    # ----------------------------------------------------------- levels
+    def update_room(self, key: object, info: RoomInfo) -> None:
+        self.rooms[key] = info
 
-    def _profile(self) -> Profile:
-        base = PROFILES[self.section]
-        peak = base.peak
-        if self.section is Section.BUILD:  # brighten as the build goes on
-            peak = 0.3 + min(1.0, self._build_bars / 8) * (base.peak - 0.3)
-        factor = self._volume_factor()
-        peak = base.floor + (peak - base.floor) * factor
-        quiet = factor < 0.6 or self._energy < 0.3
-        attack = max(base.attack_ds, 3) if quiet else base.attack_ds
-        return Profile(peak, base.floor, attack, base.instant and not quiet)
+    def remove_room(self, key: object) -> None:
+        self.rooms.pop(key, None)
 
-    def _volume_factor(self) -> float:
-        """How hard the lights may hit: the Intensity control, scaled down further
-        when the music is turned down from its recent level.
+    @property
+    def energy(self) -> float:
+        return self._energy
 
-        Volume is relative, not absolute: a Node at 4 % into a loud amp is party
-        volume, so it is compared with the highest recent setting (that memory
-        halves over about 45 minutes of music).
-        """
-        factor = 1.0
-        if self.volume is not None:
-            ref = max(self.volume, self._volume_ref or 0.0)
-            self._volume_ref = ref
-            if ref > 0:
-                rel = self.volume / ref
-                factor = 0.3 + 0.7 * rel**1.5
-            else:
-                factor = 0.3
-        return max(0.1, min(1.0, factor * self.intensity))
+    # ----------------------------------------------------------- the beat
 
-    def _lvl(self, fraction: float) -> int:
-        return max(1, round(self.min_level + (self.max_level - self.min_level) * fraction))
+    def cue(self, beat: BeatInfo) -> BeatCue:
+        """The decision for this beat. Rooms sharing the director get the same
+        object (their clocks agree to well within a quarter beat)."""
+        tolerance = min(beat.interval // 4, 80_000)
+        for cue in self._cues:
+            if abs(cue.ts - beat.ts) <= tolerance:
+                return cue
+        cue = self._decide(beat)
+        self._cues.append(cue)
+        return cue
+
+    def _decide(self, beat: BeatInfo) -> BeatCue:
+        self._beats_since_reset += 1
+        self._update_energy(beat)
+        started = False
+        first = self._look is None
+        if beat.bar_start or self._look is None:
+            started = self._on_bar(beat)
+        if beat.loudness_db is not None:
+            self._bar_db_sum += beat.loudness_db
+            self._bar_db_beats += 1
+        assert self._look is not None
+        prepared = None
+        if beat.next_is_bar and self._bars_done + 1 >= self._look.bars and self._next is None:
+            self._next = prepared = self._new_cue(beat)
+        return BeatCue(
+            beat.ts,
+            self.section,
+            self._look,
+            started,
+            first,
+            self._bars_done,
+            prepared,
+            self._energy,
+            self._build_bars,
+        )
+
+    def _on_bar(self, beat: BeatInfo) -> bool:
+        first = self._look is None
+        if beat.bar_start:
+            self._bar_count += 1
+        if self._bar_db_beats:
+            self._bar_dbs.append(self._bar_db_sum / self._bar_db_beats)
+        self._bar_db_sum = 0.0
+        self._bar_db_beats = 0
+        drop = self._is_drop(beat)
+        if drop:
+            self._energy = 1.0
+            self._fast = beat.loudness_db
+
+        section = self._next_section(beat, bool(drop))
+        new_section = section is not self.section or first
+        if new_section:
+            self.section = section
+            self._section_bars = 0
+            self._pair = self._pick_pair()
+            self._next = None
+        self._section_bars += 1
+        self._build_bars = self._build_bars + 1 if self.section is Section.BUILD else 0
+
+        if self._look is not None and not first:
+            self._bars_done += 1
+        if first or new_section or self._look is None or self._bars_done >= self._look.bars:
+            self._look = self._next or self._new_cue(beat)
+            self._next = None
+            self._bars_done = 0
+            return True
+        return False
 
     # ----------------------------------------------------------- song structure
 
@@ -501,63 +631,174 @@ class Choreographer:
 
     # ----------------------------------------------------------- looks
 
-    def _frames_per_beat(self, spec: LookSpec, rate: str, groups: list[list[int]]) -> float:
-        per_bulb = _FRAMES_PER_BULB.get(spec.rhythm, 2)
-        n = self.bulbs
-        k = max(1, len(groups))
-        playing = {
-            "unison": n,
-            "impact": n,
-            "call_response": n / k,
-            "canon": n / k,
-            "hold_play": (n - len(groups[0])) / max(1, k - 1) if groups else n,
-            "chase": 1,
-            "bounce": 1,
-            "comet": 1,
-            "sparkle": 2 if self._energy > 0.7 else 1,
-            "wave": n,
-            "swell": n,
-            "spotlight": n,
-            "build_add": n * 0.7,
-        }.get(spec.rhythm, n)
-        return RATES[rate] * playing * per_bulb
+    def _playable(self, spec: LookSpec, kind: str) -> bool:
+        """Every room in the show can play this grouping kind, and together they fit the air."""
+        if not all(grouping_options(r.layout, r.bulbs, spec, kind) for r in self.rooms.values()):
+            return False
+        if len(self.rooms) < 2 or spec.rhythm == "impact":
+            return True  # one room always fits; the drop's impact is worth a late bulb
+        at_once = sum(
+            bulbs_at_once(spec, r.bulbs, r.bulbs if kind == "solo" else TYPICAL_GROUPS.get(kind, 2), self._energy)
+            for r in self.rooms.values()
+        )
+        return at_once <= HOUSE_SLOTS
 
-    def _new_look(self, beat: BeatInfo) -> Look:
-        specs = [s for s in LOOKS[self.section] if s.rhythm not in self._recent] or LOOKS[self.section]
-        specs = [s for s in specs if any(self._grouping_options(s, g) for g in s.groupings)] or [
-            LookSpec("unison", ("half", "bar"), ("all",), (1, 2), 1)
-        ]
+    def _new_cue(self, beat: BeatInfo) -> LookCue:
+        section_looks = LOOKS[self.section]
+        specs = [s for s in section_looks if s.rhythm not in self._recent] or section_looks
+        fallback = (
+            LookSpec("chase", ("half", "bar"), ("order",), (2, 2), 1)  # one bulb per room at a time
+            if len(self.rooms) > 1
+            else LookSpec("unison", ("half", "bar"), ("all",), (1, 2), 1)
+        )
+        specs = [s for s in specs if any(self._playable(s, g) for g in s.groupings)] or [fallback]
         spec = self._rng.choices(specs, weights=[s.weight for s in specs])[0]
         self._recent.append(spec.rhythm)
-        kind = self._rng.choice([g for g in spec.groupings if self._grouping_options(spec, g)] or ["all"])
-        options = self._grouping_options(spec, kind) or self.layout.groupings["all"]
-        groups = [list(g) for g in self._rng.choice(options)]
-        order = list(self._rng.choice(self.layout.orders))
-        budget = beat.budget_per_s * beat.interval / 1e6 * 0.85
-        rate = next(
-            (r for r in spec.rates if self._frames_per_beat(spec, r, groups) <= budget),
-            spec.rates[-1],
-        )
-        while self._frames_per_beat(spec, rate, groups) > budget and rate != "bar":
+        kind = self._rng.choice([g for g in spec.groupings if self._playable(spec, g)] or ["all"])
+
+        def fits(rate: str) -> bool:
+            for room in self.rooms.values() or [RoomInfo(Layout.build(default_layout(1)), 1, beat.budget_per_s)]:
+                budget = room.budget_per_s * beat.interval / 1e6 * 0.85
+                groups = room.bulbs if kind == "solo" else TYPICAL_GROUPS.get(kind, -(-room.bulbs // 2))
+                if frames_per_beat(spec, rate, room.bulbs, groups, self._energy) > budget:
+                    return False
+            return True
+
+        rate = next((r for r in spec.rates if fits(r)), spec.rates[-1])
+        while not fits(rate) and rate != "bar":
             rate = RATE_ORDER[RATE_ORDER.index(rate) + 1]
-        if spec.rhythm in ("chase", "bounce", "comet", "wave", "build_add") and len(self._pair) > 1:
-            # Walking looks alternate the pair's two colors along the path.
-            groups = [order[0::2], order[1::2]]
-        colors = [WHITE] if spec.rhythm == "impact" else [self._pair[i % len(self._pair)] for i in range(len(groups))]
         bars = self._rng.randint(*spec.bars)
         if spec.rhythm == "build_add":
-            bars = max(1, min(4, self.bulbs - 1))
-        return Look(spec.rhythm, rate, groups, colors, order, bars)
+            most = max((r.bulbs for r in self.rooms.values()), default=4)
+            bars = max(1, min(4, most - 1))
+        self._cue_id += 1
+        return LookCue(self._cue_id, spec, kind, rate, bars, self._rng.randrange(1 << 30), self._pair)
 
-    def _grouping_options(self, spec: LookSpec, kind: str) -> list[list[list[int]]]:
-        if kind == "order":
-            return [[list(range(self.bulbs))]] if self.bulbs >= 2 else []
-        options = self.layout.groupings.get(kind, [])
-        if spec.rhythm in ("call_response", "hold_play", "canon"):
-            options = [g for g in options if len(g) >= 2]
-        if spec.rhythm == "canon":
-            options = [g for g in options if len(g) >= 3]
-        return options
+
+class Choreographer:
+    """Decides, beat by beat, what every bulb in one room does."""
+
+    def __init__(
+        self,
+        bulbs: int,
+        min_level: int,
+        max_level: int,
+        seed: int | None = None,
+        layout: list[tuple[float, float]] | None = None,
+    ) -> None:
+        self.bulbs = bulbs
+        self.min_level = min_level
+        self.max_level = max_level
+        self._rng = random.Random(seed)
+        self.layout = Layout.build(layout if layout and len(layout) == bulbs else default_layout(bulbs))
+        self.volume: float | None = None  # 0..1 from the music player, None = unknown
+        self.intensity = 1.0  # the Intensity control, 0.1..1
+        self._volume_ref: float | None = None  # the loudest recent setting = "party volume"
+        self._own_director = Director(seed)
+        self.director = self._own_director
+        self.budget_per_s = 20.0
+        self.reset()
+
+    # ----------------------------------------------------------- director
+
+    def use_director(self, director: Director | None) -> None:
+        """Follow a shared director (rooms matching each other), or our own (None)."""
+        director = director or self._own_director
+        if director is self.director:
+            return
+        self.director.remove_room(self)
+        self.director = director
+        self._room_reset()
+
+    @property
+    def section(self) -> Section:
+        return self.director.section
+
+    @property
+    def track_remaining_s(self) -> float | None:
+        return self.director.track_remaining_s
+
+    @track_remaining_s.setter
+    def track_remaining_s(self, value: float | None) -> None:
+        self.director.track_remaining_s = value
+
+    @property
+    def _energy(self) -> float:
+        return self.director.energy
+
+    # ----------------------------------------------------------- inputs
+
+    def reset(self) -> None:
+        """New song or seek: start the story over."""
+        self.director.reset()
+        self._room_reset()
+
+    def _room_reset(self) -> None:
+        self.look: Look | None = None
+        self._look_id: int | None = None
+        self._next: Look | None = None
+        self._next_id: int | None = None
+        self._level: list[int | None] = [None] * self.bulbs
+        self._color: list[RGB | None] = [None] * self.bulbs
+        self._room_flashes: deque[int] = deque(maxlen=32)
+        self._bulb_flash: list[int | None] = [None] * self.bulbs
+        self._last_sparkle: set[int] = set()
+
+    def set_palette(self, colors: list[RGB]) -> None:
+        """Album-art colors: used to bias which mood pair is picked."""
+        self.director.set_palette(colors)
+
+    # ----------------------------------------------------------- levels
+
+    def _profile(self) -> Profile:
+        section = self.director.section
+        base = PROFILES[section]
+        peak = base.peak
+        if section is Section.BUILD:  # brighten as the build goes on
+            peak = 0.3 + min(1.0, self.director._build_bars / 8) * (base.peak - 0.3)  # noqa: SLF001
+        factor = self._volume_factor()
+        peak = base.floor + (peak - base.floor) * factor
+        quiet = factor < 0.6 or self._energy < 0.3
+        attack = max(base.attack_ds, 3) if quiet else base.attack_ds
+        return Profile(peak, base.floor, attack, base.instant and not quiet)
+
+    def _volume_factor(self) -> float:
+        """How hard the lights may hit: the Intensity control, scaled down further
+        when the music is turned down from its recent level.
+
+        Volume is relative, not absolute: a Node at 4 % into a loud amp is party
+        volume, so it is compared with the highest recent setting (that memory
+        halves over about 45 minutes of music).
+        """
+        factor = 1.0
+        if self.volume is not None:
+            ref = max(self.volume, self._volume_ref or 0.0)
+            self._volume_ref = ref
+            if ref > 0:
+                rel = self.volume / ref
+                factor = 0.3 + 0.7 * rel**1.5
+            else:
+                factor = 0.3
+        return max(0.1, min(1.0, factor * self.intensity))
+
+    def _lvl(self, fraction: float) -> int:
+        return max(1, round(self.min_level + (self.max_level - self.min_level) * fraction))
+
+    # ----------------------------------------------------------- looks
+
+    def _look_from(self, cue: LookCue) -> Look:
+        """Map the director's look onto this room's bulbs."""
+        rng = random.Random(cue.seed)
+        spec = cue.spec
+        options = grouping_options(self.layout, self.bulbs, spec, cue.kind) or self.layout.groupings["all"]
+        groups = [list(g) for g in rng.choice(options)]
+        order = list(rng.choice(self.layout.orders))
+        pair = cue.pair
+        if spec.rhythm in ("chase", "bounce", "comet", "wave", "build_add") and len(pair) > 1:
+            # Walking looks alternate the pair's two colors along the path.
+            groups = [order[0::2], order[1::2]]
+        colors = [WHITE] if spec.rhythm == "impact" else [pair[i % len(pair)] for i in range(len(groups))]
+        return Look(spec.rhythm, cue.rate, groups, colors, order, cue.bars)
 
     def _send_colors(self, look: Look, effect_us: int, out: list[Command], *, with_hit: bool = False) -> None:
         """Recolor the bulbs. A color landing together with a hit (a section
@@ -575,25 +816,27 @@ class Choreographer:
     def on_beat(self, beat: BeatInfo) -> list[Command]:
         """Commands for one beat (some take effect later within the beat)."""
         out: list[Command] = []
-        self._update_energy(beat)
+        self.budget_per_s = beat.budget_per_s
+        self.director.update_room(self, RoomInfo(self.layout, self.bulbs, beat.budget_per_s))
+        cue = self.director.cue(beat)
+        if beat.bar_start and self._volume_ref is not None:
+            self._volume_ref *= 0.9995  # halves over ~1400 bars (~45 min)
 
-        if beat.bar_start or self.look is None:
-            self._on_bar(beat, out)
-
-        if beat.loudness_db is not None:
-            self._bar_db_sum += beat.loudness_db
-            self._bar_db_beats += 1
-
+        if cue.look_started or self.look is None or self._look_id != cue.look.id:
+            self._start_look(cue, beat, out)
         look = self.look
         assert look is not None
+        look.bars_done = cue.bars_done
+
         for offset in self._event_offsets(look.rate, beat):
             self._play(look, beat, beat.ts + offset, out)
             look.events += 1
 
         # Prepare the next look's colors half a beat before its first bar.
         # (If the section changes at that bar, the section's own look replaces it.)
-        if beat.next_is_bar and look.bars_done + 1 >= look.bars and self._next is None:
-            self._next = self._new_look(beat)
+        if cue.next_look is not None and self._next_id != cue.next_look.id:
+            self._next = self._look_from(cue.next_look)
+            self._next_id = cue.next_look.id
             self._send_colors(self._next, beat.ts + beat.interval // 2, out)
         # One command per bulb, attribute and instant: the last one wins
         # (e.g. a new look's floor settle replaced by a hit at the same moment).
@@ -603,47 +846,25 @@ class Choreographer:
             latest[(cmd.key, cmd.effect_us)] = cmd
         return list(latest.values())
 
-    def _on_bar(self, beat: BeatInfo, out: list[Command]) -> None:
+    def _start_look(self, cue: BeatCue, beat: BeatInfo, out: list[Command]) -> None:
         first = self.look is None
-        if beat.bar_start:
-            self._bar_count += 1
-            if self._volume_ref is not None:
-                self._volume_ref *= 0.9995  # halves over ~1400 bars (~45 min)
-        if self._bar_db_beats:
-            self._bar_dbs.append(self._bar_db_sum / self._bar_db_beats)
-        self._bar_db_sum = 0.0
-        self._bar_db_beats = 0
-        drop = self._is_drop(beat)
-        if drop:
-            self._energy = 1.0
-            self._fast = beat.loudness_db
-
-        section = self._next_section(beat, bool(drop))
-        new_section = section is not self.section or first
-        if new_section:
-            self.section = section
-            self._section_bars = 0
-            self._pair = self._pick_pair()
-            self._next = None
-        self._section_bars += 1
-        self._build_bars = self._build_bars + 1 if self.section is Section.BUILD else 0
-
-        look = self.look
-        if look is not None and not first:
-            look.bars_done += 1
-        if first or new_section or look is None or look.bars_done >= look.bars:
-            self.look = self._next or self._new_look(beat)
-            self._next = None
-            # Recolor just ahead of the first hit (bulbs are near their floor
-            # then), so colors and hits don't compete for the same airtime.
-            lead = 0 if first else min(beat.interval // 2, HIT_COLOR_LEAD_US)
-            self._send_colors(self.look, beat.ts - lead, out, with_hit=True)
-            if self.look.rhythm not in ("swell", "spotlight", "wave"):
-                # New look: bulbs without a part settle to the floor (a hit
-                # offered below for the same instant replaces this).
-                floor = self._lvl(self._profile().floor)
-                for bulb in range(self.bulbs):
-                    self._set(bulb, floor, beat.ts, HOLD_TRANSITION_DS, out)
+        if self._next is not None and self._next_id == cue.look.id:
+            self.look = self._next
+        else:
+            self.look = self._look_from(cue.look)
+        self._look_id = cue.look.id
+        self._next = None
+        self._next_id = None
+        # Recolor just ahead of the first hit (bulbs are near their floor
+        # then), so colors and hits don't compete for the same airtime.
+        lead = 0 if first or cue.first else min(beat.interval // 2, HIT_COLOR_LEAD_US)
+        self._send_colors(self.look, beat.ts - lead, out, with_hit=True)
+        if self.look.rhythm not in ("swell", "spotlight", "wave"):
+            # New look: bulbs without a part settle to the floor (a hit
+            # offered below for the same instant replaces this).
+            floor = self._lvl(self._profile().floor)
+            for bulb in range(self.bulbs):
+                self._set(bulb, floor, beat.ts, HOLD_TRANSITION_DS, out)
 
     @staticmethod
     def _event_offsets(rate: str, beat: BeatInfo) -> list[int]:

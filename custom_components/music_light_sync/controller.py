@@ -30,13 +30,17 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, STATE_OFF, STATE_ON, STATE_PLAYING, STATE_UNAVAILABLE
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, State, callback
+from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    COLOR_FORMAT_AUTO,
     CONF_AMBIENT_PERIOD,
+    CONF_AREA,
+    CONF_COLOR_FORMAT,
     CONF_END_DELAY,
     CONF_FALLBACK_PLAYER,
     CONF_GROUP_MIN_INTERVAL,
@@ -44,9 +48,11 @@ from .const import (
     CONF_IDENTITY,
     CONF_LAYOUT,
     CONF_LIGHTS,
+    CONF_MATCH_ROOMS,
     CONF_MAX_BRIGHTNESS,
     CONF_MIN_BRIGHTNESS,
     CONF_NAME,
+    CONF_PAUSE_ADAPTIVE,
     CONF_PAUSE_ENTITIES,
     CONF_PORT,
     CONF_RATE_MAX,
@@ -54,8 +60,10 @@ from .const import (
     DEFAULT_AMBIENT_PERIOD,
     DEFAULT_END_DELAY,
     DEFAULT_GROUP_MIN_INTERVAL,
+    DEFAULT_MATCH_ROOMS,
     DEFAULT_MAX_BRIGHTNESS,
     DEFAULT_MIN_BRIGHTNESS,
+    DEFAULT_PAUSE_ADAPTIVE,
     DEFAULT_PORT,
     DEFAULT_RATE_MAX,
     DOMAIN,
@@ -65,9 +73,17 @@ from .const import (
 )
 from .engine import GROUP, Command, EffectEngine, EngineSettings, Mode
 from .governor import Governor
+from .hub import async_get_hub
 from .palette import build_palette, palette_from_image
 from .sendspin_link import LinkState, SendspinLink
-from .zigbee import Bulb, ZhaOutput, resolve_bulbs
+from .zigbee import (
+    Bulb,
+    ZhaOutput,
+    adaptive_lighting_switches,
+    group_color_format,
+    resolve_bulbs,
+    room_area_of,
+)
 
 if TYPE_CHECKING:
     from aiosendspin.models.color import SessionUpdateColor
@@ -165,9 +181,11 @@ class LightSyncController:
         opts = {**entry.data, **entry.options}
         self.name: str = entry.data[CONF_NAME]
         self.light_ids: list[str] = list(entry.data[CONF_LIGHTS])
+        self.area_id: str | None = entry.data.get(CONF_AREA)
         self.group_id: int | None = opts.get(CONF_ZHA_GROUP_ID) or None
         self.fallback_player: str | None = opts.get(CONF_FALLBACK_PLAYER) or None
         self.pause_entities: list[str] = list(opts.get(CONF_PAUSE_ENTITIES, []))
+        self.pause_adaptive = bool(opts.get(CONF_PAUSE_ADAPTIVE, DEFAULT_PAUSE_ADAPTIVE))
         self.end_delay_s = float(opts.get(CONF_END_DELAY, DEFAULT_END_DELAY))
         self.min_level = _pct_to_level(opts.get(CONF_MIN_BRIGHTNESS, DEFAULT_MIN_BRIGHTNESS))
         self.max_level = _pct_to_level(opts.get(CONF_MAX_BRIGHTNESS, DEFAULT_MAX_BRIGHTNESS))
@@ -176,10 +194,13 @@ class LightSyncController:
         self._layout_text: str | None = opts.get(CONF_LAYOUT)
         self._track_key: object = None
         self._context_at = 0.0
-        self.governor = Governor(
-            rate_max=float(opts.get(CONF_RATE_MAX, DEFAULT_RATE_MAX)),
-            group_min_interval_s=self._group_min_interval_s,
-        )
+        self.match_rooms = bool(opts.get(CONF_MATCH_ROOMS, DEFAULT_MATCH_ROOMS))
+        self.color_format: str = opts.get(CONF_COLOR_FORMAT, COLOR_FORMAT_AUTO)
+        self.rate_max = float(opts.get(CONF_RATE_MAX, DEFAULT_RATE_MAX))
+        # One Zigbee budget for the whole house: every room shares the coordinator.
+        self.hub = async_get_hub(hass)
+        self.governor = Governor(airtime=self.hub.airtime)
+        self.show_group: str | None = None  # Sendspin group we play in (shared show key)
 
         # Restored by the entities on startup.
         self.armed = True
@@ -231,7 +252,9 @@ class LightSyncController:
 
     def prepare(self) -> None:
         """Resolve bulbs and build the engines (raises BulbResolveError / BulbsNotReady)."""
-        self.bulbs = resolve_bulbs(self.hass, self.light_ids)
+        self.bulbs = resolve_bulbs(self.hass, self.light_ids, self.color_format)
+        if self.area_id is None:
+            self.area_id = room_area_of(self.hass, [b.entity_id for b in self.bulbs])
         self.output = ZhaOutput(self.hass, self.bulbs, self.group_id)
         try:
             layout = parse_layout(self._layout_text, len(self.bulbs))
@@ -244,9 +267,11 @@ class LightSyncController:
             min_level=self.min_level,
             max_level=self.max_level,
             has_group=self.group_id is not None,
+            group_colors=group_color_format(self.bulbs) is not None,
             group_min_interval_us=int(self._group_min_interval_s * 1e6),
             ambient_period_us=int(self._ambient_period_s * 1e6),
         )
+        self.governor.bulbs = len(self.bulbs)
         self.engine = EffectEngine(settings, self.mode)
         self.engine.intensity = self.intensity
         self.engine.budget_per_s = self.governor.rate
@@ -271,6 +296,7 @@ class LightSyncController:
                 async_track_state_change_event(self.hass, [self.fallback_player], self._on_fallback_player)
             )
         self._stop_unsub = self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, self._async_on_hass_stop)
+        await self.hub.async_add_room(self)
         await self.link.async_start()
 
     @callback
@@ -313,10 +339,38 @@ class LightSyncController:
         # Hand back first: on shutdown ZHA stops its radio on this same event.
         await self._async_end_session(force=True)
         await self.link.async_stop()
+        self.hub.release_director(self.show_group, id(self))
+        await self.hub.async_remove_room(self)
         if hass_stopping:
             _LOGGER.debug("%s: Home Assistant stopping, show handed back", self.name)
 
+    def pause_targets(self) -> list[str]:
+        """What a show turns off: the configured entities plus, unless disabled,
+        the Adaptive Lighting switches that control this room's lights."""
+        targets = list(self.pause_entities)
+        if self.pause_adaptive:
+            targets += adaptive_lighting_switches(self.hass, self.light_ids)
+        return list(dict.fromkeys(targets))
+
+    def _room_still_using(self, entity_id: str) -> LightSyncController | None:
+        for other in self.hub.rooms.values():
+            if other is not self and other.session is not None and entity_id in other.pause_targets():
+                return other
+        return None
+
+    def adopt_paused(self, entity_id: str) -> None:
+        """Take over turning a paused entity back on (it was paused by another room)."""
+        if entity_id not in self._paused:
+            self._paused.append(entity_id)
+            self.entry.async_create_task(self.hass, self._async_save_handback(), "record adopted pause")
+
     # -------------------------------------------------------------- entities
+
+    @property
+    def room_name(self) -> str:
+        """The room's area name, or the entry name when no area is set."""
+        area = ar.async_get(self.hass).async_get_area(self.area_id) if self.area_id else None
+        return area.name if area else self.name
 
     @callback
     def add_update_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
@@ -356,7 +410,14 @@ class LightSyncController:
             "bpm": engine.bpm if engine else None,
             "pulse_source": engine.beat_source if engine else None,
             "frames_per_second": gov.frames_per_s(time.monotonic()),
-            "rate_limit": round(gov.rate, 1),
+            "rate_limit": round(gov.rate_limit, 1),
+            "room_share_fps": round(gov.rate, 1),
+            "rooms_playing": gov.airtime.rooms_playing(time.monotonic()),
+            "show_group": self.show_group,
+            "matched_rooms": self._matched_rooms(),
+            "paused_during_show": self.pause_targets(),
+            "color_formats": sorted({f"{b.model or '?'}: {b.color_format}" for b in self.bulbs}),
+            "light_sync_groups_error": self.hub.groups.last_error if self.hub.groups else None,
             "zigbee_rtt_ms": None if gov.rtt_s is None else round(gov.rtt_s * 1000),
             "lead_ms": round(self._lead_us() / 1000),
             "frames_sent": gov.stats.sent,
@@ -410,6 +471,33 @@ class LightSyncController:
         """Connection state changed."""
         if not self._stopping:
             self._notify()
+
+    @callback
+    def on_group(self, group_id: str | None) -> None:
+        """Music Assistant moved us into a (different) group: share its show if matching."""
+        self._apply_show_group(group_id)
+        self._notify()
+
+    def _apply_show_group(self, group_id: str | None) -> None:
+        if self.engine is None:
+            return
+        if group_id != self.show_group:
+            self.hub.release_director(self.show_group, id(self))
+        self.show_group = group_id
+        if self.match_rooms and group_id is not None:
+            self.engine.choreo.use_director(self.hub.acquire_director(group_id, id(self)))
+        else:
+            self.engine.choreo.use_director(None)
+
+    def _matched_rooms(self) -> list[str]:
+        """Other rooms sharing this room's show right now."""
+        if not self.match_rooms or self.show_group is None:
+            return []
+        return sorted(
+            c.name
+            for c in self.hub.rooms.values()
+            if c is not self and c.match_rooms and c.show_group == self.show_group
+        )
 
     @callback
     def on_stream_start(self, tracks_downbeats: bool, types: tuple[str, ...]) -> None:
@@ -643,7 +731,7 @@ class LightSyncController:
         leftover_paused = list(self._paused)  # already off since the interrupted show
         to_pause = [
             entity_id
-            for entity_id in self.pause_entities
+            for entity_id in self.pause_targets()
             if entity_id not in leftover_paused
             and (state := self.hass.states.get(entity_id)) is not None
             and state.state == STATE_ON
@@ -654,11 +742,13 @@ class LightSyncController:
         paused: list[str] = []
         for entity_id in to_pause:
             domain = entity_id.split(".", 1)[0]
-            data: dict[str, Any] = {"entity_id": entity_id}
+            data: dict[str, Any] = {}
             if domain == "automation":
                 data["stop_actions"] = False
             try:
-                await self.hass.services.async_call(domain, "turn_off", data, blocking=True)
+                await self.hass.services.async_call(
+                    domain, "turn_off", data, blocking=True, target={"entity_id": entity_id}
+                )
             except Exception as err:  # noqa: BLE001 - one failure must not strand the rest
                 _LOGGER.warning("Could not pause %s: %s", entity_id, err)
                 continue
@@ -680,12 +770,12 @@ class LightSyncController:
                     "light",
                     "turn_on",
                     {
-                        "entity_id": bulb.entity_id,
                         "rgb_color": list(palette[index % len(palette)]),
                         "brightness": self.max_level,
                         "transition": 0.5,
                     },
                     blocking=True,
+                    target={"entity_id": bulb.entity_id},
                 )
                 for index, bulb in enumerate(self.bulbs)
             ),
@@ -711,16 +801,22 @@ class LightSyncController:
                 failed_lights[entity_id] = captured
                 continue
             service, data = restore_call(entity_id, captured)
+            target = {"entity_id": data.pop("entity_id")}
             try:
-                await self.hass.services.async_call("light", service, data, blocking=True)
+                await self.hass.services.async_call("light", service, data, blocking=True, target=target)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("Could not restore %s: %s", entity_id, err)
                 failed_lights[entity_id] = captured
         failed_paused: list[str] = []
         for entity_id in paused_all:
+            if (other := self._room_still_using(entity_id)) is not None:
+                # Another room's show still needs it off (a shared Adaptive Lighting
+                # switch): that room turns it back on when its show ends.
+                other.adopt_paused(entity_id)
+                continue
             domain = entity_id.split(".", 1)[0]
             try:
-                await self.hass.services.async_call(domain, "turn_on", {"entity_id": entity_id}, blocking=True)
+                await self.hass.services.async_call(domain, "turn_on", blocking=True, target={"entity_id": entity_id})
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("Could not resume %s: %s", entity_id, err)
                 failed_paused.append(entity_id)

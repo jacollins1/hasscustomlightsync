@@ -15,6 +15,7 @@ from zigpy.zcl import foundation
 
 from custom_components.music_light_sync.engine import GROUP, Command
 from custom_components.music_light_sync.zigbee import (
+    Bulb,
     BulbResolveError,
     ZhaOutput,
     resolve_bulbs,
@@ -54,7 +55,7 @@ async def test_level_and_color_frames(hass: HomeAssistant) -> None:
     try:
         zha_device = SimpleNamespace(async_get_cluster=lambda ep, cid: device.endpoints[ep].in_clusters[cid])
         gateway = SimpleNamespace(get_device=lambda ieee: zha_device if str(ieee) == IEEE else None)
-        bulbs = [SimpleNamespace(entity_id="light.b", ieee=IEEE, endpoint=11)]
+        bulbs = [Bulb("light.b", IEEE, 11, "LCB002", "Signify Netherlands B.V.")]
         out = ZhaOutput(hass, bulbs, None)
         with patch("homeassistant.components.zha.helpers.get_zha_gateway", return_value=gateway):
             rtt = await out.async_send(Command(0, 0, 200, None, 5, 3))
@@ -77,7 +78,7 @@ def test_red_is_clamped_to_hue_gamut() -> None:
 
 
 async def test_zha_not_ready_is_a_frame_failure_not_a_mode_switch(hass: HomeAssistant) -> None:
-    out = ZhaOutput(hass, [SimpleNamespace(entity_id="light.b", ieee=IEEE, endpoint=11)], None)
+    out = ZhaOutput(hass, [Bulb("light.b", IEEE, 11, "LCB002", "Signify Netherlands B.V.")], None)
     with (
         patch("homeassistant.components.zha.helpers.get_zha_gateway", side_effect=ValueError("No gateway")),
         pytest.raises(Exception, match="ZHA is not ready"),
@@ -100,7 +101,7 @@ async def test_service_fallback_when_internals_missing(hass: HomeAssistant) -> N
 
     hass.services.async_register("zha", "issue_zigbee_cluster_command", handler)
     hass.services.async_register("zha", "issue_zigbee_group_command", handler)
-    bulbs = [SimpleNamespace(entity_id="light.b", ieee=IEEE, endpoint=11)]
+    bulbs = [Bulb("light.b", IEEE, 11, "LCB002", "Signify Netherlands B.V.")]
     out = ZhaOutput(hass, bulbs, 0x0002)
     # ZHA's internals changed shape (no get_device): fall back to the public services.
     with patch("homeassistant.components.zha.helpers.get_zha_gateway", return_value=object()):
@@ -150,3 +151,54 @@ async def test_group_frame_through_real_zigpy_group(hass: HomeAssistant) -> None
     assert out._direct and len(sent) == 1
     packet = sent[0]
     assert packet.dst.address == 0x0002 and packet.cluster_id == 0x0300
+
+
+async def test_third_reality_gets_native_hue_saturation_and_hue_gets_xy(hass: HomeAssistant) -> None:
+    from custom_components.music_light_sync.zigbee import (  # noqa: PLC0415
+        default_color_format,
+        group_color_format,
+        rgb_to_zcl_hs,
+        unsupported_models,
+    )
+
+    hue = Bulb("light.k", IEEE, 11, "LCB002", "Signify Netherlands B.V.")
+    tr = Bulb("light.d", IEEE, 1, "3RCB01057Z", "Third Reality, Inc")
+    odd = Bulb("light.o", IEEE, 1, "LCT015", "Signify Netherlands B.V.")
+    assert default_color_format(hue, "auto") == "xy"
+    assert default_color_format(tr, "auto") == "hs"
+    assert default_color_format(tr, "xy") == "xy" and default_color_format(hue, "hs") == "hs"
+    assert unsupported_models([hue, tr, odd]) == ["light.o (LCT015)"]
+    hs_tr = Bulb(*[getattr(tr, f) for f in ("entity_id", "ieee", "endpoint", "model", "manufacturer")], "hs")
+    xy_hue = Bulb(*[getattr(hue, f) for f in ("entity_id", "ieee", "endpoint", "model", "manufacturer")], "xy")
+    assert group_color_format([hs_tr, xy_hue]) is None  # a mixed room can't multicast colors
+    assert rgb_to_zcl_hs((255, 0, 0)) == (0, 254)
+    assert rgb_to_zcl_hs((0, 0, 255)) == (169, 254)
+
+
+async def test_xy_frames_bypass_a_quirk_that_rewrites_them(hass: HomeAssistant) -> None:
+    """Third Reality's native-HS quirk turns move_to_color into hue/sat; forced xy must reach the bulb as xy."""
+    from zigpy.zcl.clusters.lighting import Color  # noqa: PLC0415
+
+    device, frames, patcher = _zigpy_bulb()
+    try:
+        cluster = device.endpoints[11].in_clusters[0x0300]
+        original = type(cluster).command
+
+        async def quirk(self, command_id, *args, **kwargs):  # what the custom quirk does
+            if command_id == Color.ServerCommandDefs.move_to_color.id:
+                return await original(self, 0x06, hue=1, saturation=2, transition_time=0)
+            return await original(self, command_id, *args, **kwargs)
+
+        zha_device = SimpleNamespace(async_get_cluster=lambda ep, cid: device.endpoints[ep].in_clusters[cid])
+        gateway = SimpleNamespace(get_device=lambda ieee: zha_device)
+        with (
+            patch.object(type(cluster), "command", quirk),
+            patch("homeassistant.components.zha.helpers.get_zha_gateway", return_value=gateway),
+        ):
+            xy = ZhaOutput(hass, [Bulb("light.d", IEEE, 11, "3RCB01057Z", "Third Reality, Inc", "xy")], None)
+            await xy.async_send(Command(0, 0, None, (255, 0, 0), 3, 1))
+            hs = ZhaOutput(hass, [Bulb("light.d", IEEE, 11, "3RCB01057Z", "Third Reality, Inc", "hs")], None)
+            await hs.async_send(Command(0, 0, None, (0, 0, 255), 3, 1))
+        assert [cmd for _cluster, cmd, _data in frames] == [0x07, 0x06]
+    finally:
+        patcher.stop()

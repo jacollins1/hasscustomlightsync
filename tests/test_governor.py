@@ -76,11 +76,27 @@ def test_color_before_level_at_the_same_moment() -> None:
 
 def test_group_frames_spaced() -> None:
     gov = Governor(rate_max=50, burst=10, group_min_interval_s=2.0)
+    gov.bulbs = 3
     gov.offer([cmd(GROUP, 0, level=None)])
-    assert len(gov.take(0.0, 0)) == 1
+    assert [c.target for c in gov.take(0.0, 0)] == [GROUP]
+    # Too soon for another multicast: it goes out bulb by bulb instead of waiting (and going stale).
     gov.offer([cmd(GROUP, 1_000_000, level=None)])
     assert gov.take(1.0, 1_000_000) == []
-    assert gov.take(2.05, 1_050_000) != []
+    assert sorted(c.target for c in gov.take(1.02, 1_000_000)) == [0, 1, 2]
+    gov.offer([cmd(GROUP, 2_100_000, level=None)])
+    assert [c.target for c in gov.take(2.1, 2_100_000)] == [GROUP]
+
+
+def test_two_rooms_may_each_multicast_on_the_same_drop() -> None:
+    from custom_components.music_light_sync.governor import Airtime  # noqa: PLC0415
+
+    air = Airtime(rate_max=50, burst=10, group_min_interval_s=2.0)
+    kitchen, dining = Governor(airtime=air), Governor(airtime=air)
+    kitchen.offer([cmd(GROUP, 0)])
+    dining.offer([cmd(GROUP, 0)])
+    assert [c.target for c in kitchen.take(0.0, 0)] == [GROUP]
+    assert [c.target for c in dining.take(0.0, 0)] == [GROUP]
+    assert air.group_tokens < 1  # but the house average stays one per 2 s
 
 
 def test_aimd_backs_off_and_recovers() -> None:
@@ -115,3 +131,22 @@ def test_inflight_limit() -> None:
     assert gov.take(0.01, 0) == []
     gov.on_result(0.02, 0.05, True)
     assert len(gov.take(0.03, 0)) == 1
+
+
+def test_rooms_share_one_house_budget() -> None:
+    from custom_components.music_light_sync.governor import Airtime  # noqa: PLC0415
+
+    air = Airtime(rate_max=20, burst=40, max_inflight=6)
+    kitchen, dining = Governor(airtime=air), Governor(airtime=air)
+    kitchen.offer([cmd(i, 0) for i in range(5)])
+    dining.offer([cmd(i, 0) for i in range(4)])
+    assert len(kitchen.take(0.0, 0)) == 5  # alone so far: may use most of the slots
+    sent = dining.take(0.0, 0)
+    assert len(sent) == 1  # the house limit of 6 frames in flight holds across rooms
+    assert air.inflight == 6
+    # Both playing: each gets half the rate and half the slots.
+    assert kitchen.rate == dining.rate == 10
+    for _ in range(6):
+        (kitchen if kitchen.inflight else dining).on_result(0.1, 0.1, True)
+    kitchen.offer([cmd(i, 1) for i in range(5)])
+    assert len(kitchen.take(0.2, 1)) == 3  # its share: 6 slots / 2 rooms

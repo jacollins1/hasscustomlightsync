@@ -16,7 +16,13 @@ Music Assistant already analyzes the audio it decodes. This integration connects
 
 ## What to expect
 
-Each **Music Light Sync** entry drives one room or zone. Add one entry per room (kitchen, living room, patio…): each gets its own bulbs, layout, Music Assistant player and settings.
+Each **Music Light Sync** entry is one room: its own bulbs, layout, settings, and its own player in Music Assistant ("Kitchen Lights", "Dining Room Lights"). Add rooms with **Add entry** on the integration page; each one shows up there with its device, **Music Sync - <Room>**, placed in the room's area.
+
+Rooms work together:
+
+- **Light sync players.** Music Assistant gets one **<speaker> - Light sync** player for every BluOS speaker (for example **Living Room - Light sync**): the speaker plus every light room that joined it. Play to that player and the speaker plays while the lights in those rooms run. The players follow their speakers: a new BluOS speaker gets one, a disabled speaker disables it, a removed speaker removes it. A speaker Music Assistant can't group with light players (in this house: Office and Outside) gets a player with just the speaker.
+- **Match other rooms.** Rooms with this option on that play in the same group run one show: same section, color pair, rhythm, rate and look length, changing on the same beat, each mapped onto its own bulbs and layout. Rooms with it off run their own show even when grouped.
+- **One Zigbee budget.** All rooms share one coordinator, so the frame budget is house-wide: two rooms playing get half each, not double.
 
 - **Party (lighting designer)** (default): runs the room the way a lighting operator would, following the club lighting rules below.
   - **Song structure.** It reads the track's loudness bar by bar and follows the story: *warm-up* → *groove* → *build* → *drop* → *peak* → *breakdown* → *outro*.
@@ -63,29 +69,39 @@ Timing jitter is about 50–150 ms. Zigbee allows only 10–20 frames per second
 
 ## Requirements
 
-- Home Assistant 2026.10 or later with ZHA.
+- Home Assistant 2026.10 or later with ZHA, and the Music Assistant integration (used for the Light sync players).
 - Music Assistant 2.10.7 or later. It provides the Sendspin visualizer and color roles, and beat analysis through Smart Fades.
-- Color bulbs on ZHA. Tested against the zigpy 2.3 ZCL definitions for `move_to_level` and `move_to_color`.
+- Color bulbs on ZHA. Built and tested for:
+
+  | Bulb | Home Assistant model | Color sent as |
+  |---|---|---|
+  | Philips Hue White and Color Ambiance BR30 (R578096-4) | LCB002 | CIE xy |
+  | Philips Hue White and Color Ambiance A19 (562785) | LCA005 | CIE xy |
+  | Philips Hue White and Color Ambiance A19 (590851) | 9290022266 | CIE xy |
+  | Third Reality color bulb | 3RCB01057Z | hue/saturation |
+
+  Any other ZHA light can be added after a warning.
 
 ## Install (HACS)
 
 1. In HACS, open the three-dot menu, choose **Custom repositories**, add this repository's URL, and set the category to **Integration**.
 2. Install **Music Light Sync** and restart Home Assistant.
-3. Go to **Settings → Devices & services → Add integration → Music Light Sync**:
-   - **Name**: e.g. `Kitchen Lights`. This is the player name shown in Music Assistant.
-   - **Lights**: the room's bulbs, e.g. `light.kitchen_overhead_light_bulbs`. Group helpers are expanded, and every member must be a ZHA color light.
-   - **Host**: pre-filled from your Music Assistant integration. **Port**: `8927`.
+3. Go to **Settings → Devices & services → Add integration → Music Light Sync** (later rooms: **Add entry** on the integration's page):
+   - **Room**: the area, e.g. Dining Room. Leave **Lights** empty to take every ZHA color light in it, or pick them (a light group helper is expanded in member order).
+   - **Name**: leave empty for `<Room> Lights`. This is the room's player in Music Assistant.
+   - **Host** / **Port** (first room only): pre-filled from your Music Assistant integration, `8927`.
+4. To change a room's area, name or lights later: the room's **⋮ → Reconfigure**. It keeps its Music Assistant player.
 
 ## One-time setup in Music Assistant
 
-1. **Approve the player.** Go to **Settings → Players** and open **Kitchen Lights**. Light players are hidden by default, so you may need to show hidden players first. Approve it with the one-click allow option rather than pairing. Until you do, the integration's Status sensor reads *Waiting for approval in Music Assistant*. Allowing it exposes nothing on the Home Assistant side, because the client only has the visualizer and color roles: no microphone and no audio output.
+1. **Approve each room's player.** Go to **Settings → Players** and open the room's player (e.g. **Kitchen Lights**). Light players are hidden by default, so you may need to show hidden players first. Approve it with the one-click allow option rather than pairing. Until you do, the integration's Status sensor reads *Waiting for approval in Music Assistant*. Allowing it exposes nothing on the Home Assistant side, because the client only has the visualizer and color roles: no microphone and no audio output.
 2. **Check the Node can join Sendspin groups.** Open the **Living Room** (Node) player and confirm AirPlay is listed among its protocols. Music Assistant uses AirPlay 2 to keep the Node in sync with Sendspin members.
 
 ## Daily use: two paths
 
 | Path | How | Audio to the Node | Lights |
 |---|---|---|---|
-| **Synced** | In Music Assistant, group **Living Room** with **Kitchen Lights** (and any other light rooms) | AirPlay 2, capped at 24-bit/48 kHz | All effects, beat-accurate |
+| **Synced** | Play to **Living Room - Light sync** (or group **Living Room** with any room's light player by hand) | AirPlay 2, capped at 24-bit/48 kHz | All effects, beat-accurate |
 | **Native hi-res** | Play to **Living Room** alone | Native BluOS, full Tidal resolution | Optional: the Ambient palette from album art, via the fallback player |
 
 The **Sync** switch arms the integration. While it is on and Music Assistant streams to the group:
@@ -103,10 +119,14 @@ If Home Assistant stops, the integration hands back first. If it crashes or lose
 | Bulb layout | Where each bulb is in the room: one `x, y` line per bulb, in the order of the *Lights* list, 0–100 across and down as seen from above. Party mode builds its pairs, splits and chase paths from it. Without a layout the bulbs are treated as a row. The kitchen is below. |
 | Music player | The room's Music Assistant player, e.g. `media_player.node_a7d8`. Party mode reads the volume, the time left in the track (for the outro) and track changes from it; the native hi-res path uses it for the ambient palette. |
 | ZHA group | Recommended. In ZHA, create a group with exactly this room's bulbs and pick it here. Whole-room changes (a drop's white flash) then take one multicast frame instead of one per bulb, which keeps drops on time. The option is refused if the group has other members. |
-| Zigbee frame budget | 20 frames/s (the default). The governor backs off by itself if the mesh gets congested. |
+| Light sync speakers | Which speakers' **- Light sync** players this room joins. All ticked (the default) also joins speakers added later. |
+| Match other rooms | On (default): run one show with other matching rooms in the same group. |
+| Color format | Automatic: each bulb gets its native format (Hue: CIE xy; Third Reality: hue/saturation, the same thing its *Native hue/saturation color* quirk switch does). Nothing on the bulbs is switched during a show, so there is nothing to put back. If Hue and Third Reality bulbs don't match side by side, force **Hue/saturation for every bulb** or **CIE xy for every bulb**. A ZHA group mixing formats sends colors bulb by bulb. |
+| Zigbee frame budget | 20 frames/s for the whole house (the default). Rooms playing at the same time share it; the lowest value set in any room applies. The governor backs off by itself if the mesh gets congested. |
 | Min. group spacing | 2 s. Multicast frames fill the coordinator's broadcast table, so don't go lower. |
 | Min/Max brightness | 15 % / 100 % |
-| Pause during a show | Automations that would fight the show, e.g. the room's occupancy and illuminance automations, or an Adaptive Lighting switch. |
+| Pause Adaptive Lighting during a show | On (default). Every Adaptive Lighting switch that controls this room's lights (found from Adaptive Lighting's own light lists, groups included) is turned off when the show starts and back on afterwards, if it was on. A switch shared by two rooms stays off until the last of them stops. The status sensor's `paused_during_show` attribute lists what will be paused. |
+| Pause during a show | Other automations that would fight the show, e.g. the room's occupancy and illuminance automations. |
 | Restore after | 10 s |
 
 Kitchen layout (1 top center, 2 left upper, 3 right middle, 4 left lower, 5 right bottom; assumes the *Lights* list is in that order):
@@ -139,7 +159,7 @@ Pick **Beat breathe** and play something with a clear kick drum. Watch whether t
 
 - Every command is one ZCL frame, either `Level Control / move_to_level` or `Color Control / move_to_color`, with the bulb doing the fade. Frames go directly to ZHA's zigpy cluster objects, so the event bus is not flooded with `call_service` events. If ZHA's internals change, it falls back to the `zha.issue_zigbee_*_command` services.
 - At most 6 frames are in flight at once, out of zigpy's 8 request slots, so other devices are slowed during a show but never starved.
-- The bulbs report their new brightness and color back to ZHA, so the light entities update during a show. To keep those state changes out of the history database, exclude the 5 bulb entities from `recorder`.
+- The bulbs report their new brightness and color back to ZHA, so the light entities update during a show, several times a second per bulb. That's history-database writes, nothing more. If you want them out of the history, add the bulbs to `recorder: exclude: entities:` in `configuration.yaml`. That part of the configuration can only be edited in YAML, so make it a managed edit: keep a copy of the file, run **Check configuration** in the **YAML** tab of **Tools**, then restart (recorder settings are not reloadable). Ask Claude to make the edit through Home Assistant's config API (it backs the file up and validates it first) rather than hand-editing.
 
 ## Limitations
 

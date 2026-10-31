@@ -34,7 +34,7 @@ from .const import SPECTRUM_BINS, SPECTRUM_F_MAX, SPECTRUM_F_MIN, VISUALIZER_RAT
 
 if TYPE_CHECKING:
     from aiosendspin.models.color import SessionUpdateColor
-    from aiosendspin.models.core import ServerStatePayload, StreamStartMessage
+    from aiosendspin.models.core import GroupUpdateServerPayload, ServerStatePayload, StreamStartMessage
     from aiosendspin.models.visualizer import VisualizerFrame
     from homeassistant.core import HomeAssistant
 
@@ -75,6 +75,9 @@ class LinkListener(Protocol):
     def on_color(self, color: SessionUpdateColor | None) -> None:
         """The palette for the current audio changed."""
 
+    def on_group(self, group_id: str | None) -> None:
+        """Music Assistant put this client in a (different) Sendspin group."""
+
 
 def new_identity_hex() -> str:
     """Create the private key that gives this client a stable Sendspin client id."""
@@ -111,6 +114,7 @@ class SendspinLink:
         self._task: asyncio.Task[None] | None = None
         self._state = LinkState.DISCONNECTED
         self._unsubs: list[Callable[[], None]] = []
+        self.group_id: str | None = None
         self.last_error: str | None = None
 
     @property
@@ -228,7 +232,16 @@ class SendspinLink:
             color = getattr(payload, "color", None) if payload is not None else None
             listener.on_color(color if hasattr(color, "primary") else None)
 
+        def _group(payload: GroupUpdateServerPayload) -> None:
+            # Updates are deltas: a missing group_id means "unchanged". A client
+            # that leaves a group is moved to a group of its own (a new id).
+            group_id = getattr(payload, "group_id", None)
+            if group_id is not None and group_id != self.group_id:
+                self.group_id = group_id
+                listener.on_group(group_id)
+
         self._unsubs = [
+            client.add_group_update_listener(_group),
             client.add_stream_start_listener(_start),
             client.add_stream_end_listener(_end),
             client.add_stream_clear_listener(_clear),

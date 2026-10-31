@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Final
 
 DOMAIN: Final = "music_light_sync"
-VERSION: Final = "0.3.0"
+VERSION: Final = "0.3.1"
 
 # Config entry data
 CONF_HOST: Final = "host"
@@ -13,6 +13,7 @@ CONF_PORT: Final = "port"
 CONF_NAME: Final = "name"
 CONF_LIGHTS: Final = "lights"
 CONF_IDENTITY: Final = "identity"
+CONF_AREA: Final = "area"  # the room (Home Assistant area) this entry lights
 
 # Options
 CONF_ZHA_GROUP_ID: Final = "zha_group_id"
@@ -25,6 +26,15 @@ CONF_PAUSE_ENTITIES: Final = "pause_entities"
 CONF_END_DELAY: Final = "end_delay"
 CONF_AMBIENT_PERIOD: Final = "ambient_period"
 CONF_LAYOUT: Final = "layout"
+CONF_MATCH_ROOMS: Final = "match_rooms"  # share one show with other matching rooms in the same group
+CONF_COLOR_FORMAT: Final = "color_format"  # auto | hs | xy
+CONF_PAUSE_ADAPTIVE: Final = "pause_adaptive_lighting"  # pause the room's Adaptive Lighting switches
+CONF_SPEAKERS: Final = "light_sync_speakers"  # BluOS players whose Light sync group this room joins
+
+COLOR_FORMAT_AUTO: Final = "auto"
+DEFAULT_MATCH_ROOMS: Final = True
+DEFAULT_PAUSE_ADAPTIVE: Final = True
+LIGHT_SYNC_SUFFIX: Final = " - Light sync"
 
 DEFAULT_PORT: Final = 8927
 DEFAULT_NAME: Final = "Music Lights"

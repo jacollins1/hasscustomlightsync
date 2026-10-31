@@ -335,3 +335,90 @@ def test_intensity_control() -> None:
     top, instant, jump = _swing(run_song(intensity=0.4))
     assert instant == 0 and jump == 0
     assert top <= 0.45 * 254
+
+
+# --------------------------------------------------------------- rooms matching each other
+
+DINING = [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)]
+
+
+def _two_rooms(shared: bool, bpm: float = 128) -> tuple[list, list]:
+    """Kitchen (5 Hue) and dining room (4 Third Reality) fed the same song."""
+    from custom_components.music_light_sync.choreo import Director  # noqa: PLC0415
+
+    interval = int(60_000_000 / bpm)
+    rooms = [
+        EffectEngine(EngineSettings(bulbs=5, min_level=10, max_level=254, layout=KITCHEN), Mode.PARTY, seed=1),
+        EffectEngine(EngineSettings(bulbs=4, min_level=10, max_level=254, layout=DINING), Mode.PARTY, seed=2),
+    ]
+    if shared:
+        director = Director()
+        for room in rooms:
+            room.choreo.use_director(director)
+    traces: list[list] = [[], []]
+    ts = 2_000_000
+    beats = []
+    for loud, bars, _label in SONG:
+        for bar in range(bars):
+            db = (-12 + 5 * bar / (bars - 1)) if loud == "ramp" else loud
+            for pos in range(4):
+                beats.append(ts)
+                for i, room in enumerate(rooms):
+                    jitter = 3_000 * i  # each room's clock estimate differs a little
+                    room.tracks_downbeats = True
+                    room.add_beat(ts + jitter, pos == 0)
+                    for k in range(0, interval, 66_000):
+                        room.add_loudness(ts + jitter + k, int((db + 60) * DB_UNIT))
+                ts += interval
+    now = 0
+    while now <= beats[-1] + interval:
+        for i, room in enumerate(rooms):
+            room.choreo.track_remaining_s = 200
+            room.step(now, LEAD_US)
+            look = room.choreo.look
+            if look is not None and (not traces[i] or traces[i][-1][0] is not look):
+                traces[i].append((look, room.choreo.section, now))
+        now += TICK_US
+    return traces[0], traces[1]
+
+
+def _signature(trace: list) -> list[tuple]:
+    return [(section, look.rhythm, look.rate, look.bars, tuple(sorted(set(look.colors)))) for look, section, _ in trace]
+
+
+def test_matching_rooms_run_one_show() -> None:
+    kitchen, dining = _two_rooms(shared=True)
+    assert len(kitchen) > 10
+    assert _signature(kitchen) == _signature(dining)  # same section, rhythm, rate, length and colors
+    for (_, _, t1), (_, _, t2) in zip(kitchen, dining, strict=True):
+        assert abs(t1 - t2) <= 40_000  # and they change together (one tick + clock jitter)
+
+
+def test_independent_rooms_run_their_own_shows() -> None:
+    kitchen, dining = _two_rooms(shared=False)
+    assert _signature(kitchen) != _signature(dining)
+
+
+def test_shared_director_ignores_a_second_rooms_reset() -> None:
+    from custom_components.music_light_sync.choreo import BeatInfo, Choreographer, Director  # noqa: PLC0415
+
+    director = Director()
+    a = Choreographer(5, 10, 254, seed=1, layout=KITCHEN)
+    b = Choreographer(4, 10, 254, seed=2, layout=DINING)
+    a.use_director(director)
+    b.use_director(director)
+    ts = 0
+    for i in range(40):
+        beat = BeatInfo(ts, 500_000, i % 4, 4, i % 4 == 0, i % 4 == 3, -12.0)
+        a.on_beat(beat)
+        b.on_beat(beat)
+        ts += 500_000
+    a.reset()  # track change seen by the kitchen...
+    for i in range(2):
+        beat = BeatInfo(ts, 500_000, i % 4, 4, i % 4 == 0, i % 4 == 3, -12.0)
+        a.on_beat(beat)
+        b.on_beat(beat)
+        ts += 500_000
+    bars = director._bar_count  # noqa: SLF001
+    b.reset()  # ...and a second later by the dining room: no second restart
+    assert director._bar_count == bars  # noqa: SLF001

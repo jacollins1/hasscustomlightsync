@@ -21,10 +21,11 @@ class LightSyncEntity(Entity):
         self._attr_unique_id = f"{controller.entry.entry_id}_{key}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, controller.entry.entry_id)},
-            name=controller.name,
+            name=f"Music Sync - {controller.room_name}",
             manufacturer="Music Light Sync",
             model="Sendspin visualizer",
             sw_version=VERSION,
+            suggested_area=controller.room_name if controller.area_id else None,
         )
 
     async def async_added_to_hass(self) -> None:

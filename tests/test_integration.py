@@ -138,20 +138,26 @@ async def test_full_show(hass: HomeAssistant, hass_storage: dict, sendspin_serve
         await asyncio.sleep(0.03)
         return 0.06
 
-    status = "sensor.kitchen_lights_status"
+    status = "sensor.music_sync_kitchen_lights_status"
     with patch.object(ZhaOutput, "async_send", fake_send):
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
         controller = entry.runtime_data
         assert [b.entity_id for b in controller.bulbs] == lights
         assert controller.bulbs[0].ieee == "00:17:88:01:0b:00:00:00" and controller.bulbs[0].endpoint == 11
-        assert hass.states.get("number.kitchen_lights_intensity").state == "100"
+        assert hass.states.get("number.music_sync_kitchen_lights_intensity").state == "100"
         await hass.services.async_call(
-            "number", "set_value", {"entity_id": "number.kitchen_lights_intensity", "value": 50}, blocking=True
+            "number",
+            "set_value",
+            {"entity_id": "number.music_sync_kitchen_lights_intensity", "value": 50},
+            blocking=True,
         )
         assert controller.intensity == 0.5
         await hass.services.async_call(
-            "number", "set_value", {"entity_id": "number.kitchen_lights_intensity", "value": 100}, blocking=True
+            "number",
+            "set_value",
+            {"entity_id": "number.music_sync_kitchen_lights_intensity", "value": 100},
+            blocking=True,
         )
 
         # Connected, but Music Assistant hasn't approved the new player yet.
@@ -159,7 +165,7 @@ async def test_full_show(hass: HomeAssistant, hass_storage: dict, sendspin_serve
         await hass.services.async_call(
             "select",
             "select_option",
-            {"entity_id": "select.kitchen_lights_effect", "option": "beat_breathe"},
+            {"entity_id": "select.music_sync_kitchen_lights_effect", "option": "beat_breathe"},
             blocking=True,
         )
         client_id = client_id_for(identity)
@@ -271,17 +277,19 @@ async def test_disarm_ends_show_immediately(hass: HomeAssistant, sendspin_server
         client_id = client_id_for(identity)
         await _until(lambda: server.get_client(client_id) is not None and server.get_client(client_id).is_connected)
         await server.trust_unpaired(client_id)
-        await _until(lambda: hass.states.get("sensor.kitchen_lights_status").state == "idle")
+        await _until(lambda: hass.states.get("sensor.music_sync_kitchen_lights_status").state == "idle")
         group = server.get_client(client_id).group
         stream = group.start_stream()
         pcm = kick_pcm(2)
         for offset in range(0, len(pcm), RATE // 5 * 4):
             stream.prepare_audio(pcm[offset : offset + RATE // 5 * 4], FMT)
             await stream.commit_audio()
-        await _until(lambda: hass.states.get("sensor.kitchen_lights_status").state == "syncing")
+        await _until(lambda: hass.states.get("sensor.music_sync_kitchen_lights_status").state == "syncing")
 
-        await hass.services.async_call("switch", "turn_off", {"entity_id": "switch.kitchen_lights_sync"}, blocking=True)
-        assert hass.states.get("sensor.kitchen_lights_status").state == "idle"
+        await hass.services.async_call(
+            "switch", "turn_off", {"entity_id": "switch.music_sync_kitchen_lights_sync"}, blocking=True
+        )
+        assert hass.states.get("sensor.music_sync_kitchen_lights_status").state == "idle"
         assert entry.runtime_data.session is None
 
         group.stop_stream()
@@ -323,13 +331,13 @@ async def test_bulb_that_stops_answering_is_rested(hass: HomeAssistant, sendspin
         await hass.services.async_call(
             "select",
             "select_option",
-            {"entity_id": "select.kitchen_lights_effect", "option": "beat_breathe"},
+            {"entity_id": "select.music_sync_kitchen_lights_effect", "option": "beat_breathe"},
             blocking=True,
         )
         client_id = client_id_for(identity)
         await _until(lambda: server.get_client(client_id) is not None and server.get_client(client_id).is_connected)
         await server.trust_unpaired(client_id)
-        await _until(lambda: hass.states.get("sensor.kitchen_lights_status").state == "idle")
+        await _until(lambda: hass.states.get("sensor.music_sync_kitchen_lights_status").state == "idle")
         group = server.get_client(client_id).group
         stream = group.start_stream()
         pcm = kick_pcm(6)
@@ -346,7 +354,7 @@ async def test_bulb_that_stops_answering_is_rested(hass: HomeAssistant, sendspin
         await _until(
             lambda: (
                 "light.hue_bulb_1"
-                in hass.states.get("sensor.kitchen_lights_status").attributes.get("resting_bulbs", [])
+                in hass.states.get("sensor.music_sync_kitchen_lights_status").attributes.get("resting_bulbs", [])
             )
         )
         failed_before = attempts.count(1)

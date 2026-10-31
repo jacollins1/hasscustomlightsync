@@ -75,6 +75,7 @@ class EngineSettings:
     min_level: int = 40
     max_level: int = 254
     has_group: bool = False
+    group_colors: bool = True  # False when the room's bulbs need different color formats
     group_min_interval_us: int = 2_000_000
     bar_transition_ds: int = 3
     ambient_period_us: int = 10_000_000
@@ -374,7 +375,7 @@ class EffectEngine:
             buckets.setdefault((cmd.effect_us, cmd.level, cmd.rgb, cmd.transition_ds, cmd.priority), []).append(cmd)
         result: list[Command] = []
         for (effect_us, level, rgb, transition_ds, priority), cmds in buckets.items():
-            whole_room = len({c.target for c in cmds}) == s.bulbs
+            whole_room = len({c.target for c in cmds}) == s.bulbs and (rgb is None or s.group_colors)
             # Margin over the governor's own spacing so it never holds a group frame back.
             spaced = self._last_group_us is None or effect_us - self._last_group_us >= s.group_min_interval_us + 500_000
             if whole_room and spaced:
@@ -426,7 +427,7 @@ class EffectEngine:
     def _rolling_color(self, ts: int, bar_start: bool, span_us: int, out: list[Command]) -> None:
         """Advance colors: whole group on every Nth bar, else one bulb per pulse."""
         s = self.settings
-        if s.has_group:
+        if s.has_group and s.group_colors:
             if not bar_start:
                 return
             self._bar_count += 1
@@ -449,7 +450,7 @@ class EffectEngine:
         if not bar_start:
             return
         s = self.settings
-        if s.has_group:
+        if s.has_group and s.group_colors:
             if self._last_group_us is not None and ts - self._last_group_us < s.group_min_interval_us:
                 return  # broadcast budget: skip this bar, take the next
             self._last_group_us = ts
