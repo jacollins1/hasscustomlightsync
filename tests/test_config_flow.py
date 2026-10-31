@@ -304,7 +304,7 @@ async def test_migration_records_the_room_area(hass: HomeAssistant) -> None:
     )
     entry.add_to_hass(hass)
     assert await async_migrate_entry(hass, entry)
-    assert entry.version == 3
+    assert entry.version == 4
     assert entry.data[CONF_AREA] == kitchen.id
     assert entry.data[CONF_IDENTITY] == "0" * 64
     assert entry.options[CONF_SHOW_MODE] == "mirrored"
@@ -316,11 +316,16 @@ async def test_migration_to_show_modes_drops_the_music_player(hass: HomeAssistan
             domain=DOMAIN,
             version=2,
             data={**CONNECTION, CONF_NAME: "K", CONF_LIGHTS: [], CONF_IDENTITY: "00" * 32},
-            options={CONF_MATCH_ROOMS: match, "fallback_player": "media_player.node_a7d8", CONF_LAYOUT: "1, 2"},
+            options={
+                CONF_MATCH_ROOMS: match,
+                "fallback_player": "media_player.node_a7d8",
+                "light_sync_speakers": ["90568298A7D8"],
+                CONF_LAYOUT: "1, 2",
+            },
         )
         entry.add_to_hass(hass)
         assert await async_migrate_entry(hass, entry)
-        assert entry.version == 3
+        assert entry.version == 4
         assert entry.options == {CONF_SHOW_MODE: mode, CONF_LAYOUT: "1, 2"}  # layout source: decided at setup
 
 

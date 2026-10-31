@@ -17,7 +17,7 @@
       },
       "room": {
         "title": "{room}",
-        "description": "Each room gets its own Music Assistant player, named like this entry, and its own light show. It is connected and shown in Music Assistant automatically and joins the '<speaker> - Light sync' players.",
+        "description": "Each room gets its own player in Music Assistant, named like this entry, and its own light show. It is connected and shown in Music Assistant automatically. To light the room, group its player with a speaker in Music Assistant (e.g. Living Room + Music Sync - Kitchen).",
         "data": {
           "name": "Name",
           "lights": "ZHA color lights"
@@ -73,7 +73,6 @@
           "pause_adaptive_lighting": "Pause Adaptive Lighting during a show",
           "show_mode": "When this room plays with other rooms",
           "color_format": "Color format",
-          "light_sync_speakers": "Light sync speakers",
           "layout_source": "Bulb positions from",
           "layout": "Bulb layout (manual)"
         },
@@ -84,9 +83,8 @@
           "pause_entities": "Other automations, switches or input booleans to turn off during a show and back on afterwards, if they were on. The room's Adaptive Lighting switches are handled by the option above.",
           "end_delay": "Pausing, skipping and short gaps between tracks do not restore the lights unless the silence lasts longer than this.",
           "pause_adaptive_lighting": "Turns off every Adaptive Lighting switch that controls this room's lights when a show starts, and turns each one back on (if it was on) when the show has ended. A switch shared with another room that is still playing stays off until that room's show ends too.",
-          "show_mode": "Applies when this room plays in the same Music Assistant group as other rooms. House-wide: rooms set to house-wide draw one show across all their bulbs, so chases and waves travel from room to room (needs every bulb pinned on the floor plan; otherwise mirrored). Mirrored: the same colors, rhythm and section changes on the same beat, each room on its own bulbs. Independent: this room runs its own show.",
+          "show_mode": "Applies when this room's light player is grouped with the same speaker as other rooms in Music Assistant. House-wide: rooms set to house-wide draw one show across all their bulbs, so chases and waves travel from room to room (needs every bulb pinned on the floor plan; otherwise mirrored). Mirrored: the same colors, rhythm and section changes on the same beat, each room on its own bulbs. Independent: this room runs its own show.",
           "color_format": "How colors are sent. Automatic sends each bulb its native format (Hue: CIE xy, Third Reality: hue/saturation, like its 'Native hue/saturation color' quirk switch). Nothing on the bulbs is switched, so there is nothing to put back. Force one format if Hue and Third Reality colors don't match side by side.",
-          "light_sync_speakers": "This room joins the '<speaker> - Light sync' player of every speaker ticked here. Playing to that player runs the lights in all rooms that joined it. All ticked = also join speakers added later.",
           "layout_source": "Floor plan: where each bulb is pinned on the floor plan dashboard, updated whenever the plan is saved. Manual: the text below. A room switches to the floor plan by itself once every one of its bulbs is pinned.",
           "layout": "Used with Manual. One line per bulb: 'x, y' from 0 to 100 (0, 0 = top left). Start a line with the bulb's entity id ('light.dining_bulb_1: 22, 29') or its number in the Lights list ('3: 76, 72'); lines without one are taken in Lights order. Party mode uses positions for left/right and top/bottom splits, nearest-neighbor pairs, sweeps and waves. Empty = bulbs in a row."
         }

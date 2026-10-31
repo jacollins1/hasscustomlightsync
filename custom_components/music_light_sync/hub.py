@@ -4,7 +4,8 @@
   the same coordinator, so two rooms playing share 20 frames/s, not 40.
 * ``directors``: the shared show for rooms that match each other while they
   play in the same Music Assistant group (keyed by Sendspin group id).
-* ``groups``: the "<speaker> - Light sync" players in Music Assistant.
+* ``groups``: housekeeping for the rooms' players in Music Assistant (shown
+  once; the old "<speaker> - Light sync" groups removed).
 * ``pins``: bulb positions from the floor plan, re-read when it is saved.
 """
 
@@ -23,7 +24,6 @@ from .const import (
     CONF_LAYOUT_SOURCE,
     CONF_LIGHTS,
     CONF_RATE_MAX,
-    CONF_SPEAKERS,
     DEFAULT_GROUP_MIN_INTERVAL,
     DEFAULT_RATE_MAX,
     DOMAIN,
@@ -33,7 +33,7 @@ from .const import (
 )
 from .floorplan import FLOORPLAN_DASHBOARD, Pin, async_load_pins, device_ids, room_positions
 from .governor import Airtime
-from .ma_groups import ClientApi, LightSyncGroups, MusicAssistantApi, Room
+from .ma_groups import ClientApi, MusicAssistantApi, Room, RoomPlayers
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -50,7 +50,7 @@ class Hub:
 
     hass: HomeAssistant
     airtime: Airtime
-    groups: LightSyncGroups | None = None
+    groups: RoomPlayers | None = None
     directors: dict[str, tuple[Director, set[int]]] = field(default_factory=dict)
     rooms: dict[str, Any] = field(default_factory=dict)  # entry_id -> controller
     _api: MusicAssistantApi | None = None
@@ -153,7 +153,7 @@ class Hub:
             async def _save(mapping: dict[str, Any]) -> None:
                 await store.async_save(mapping)
 
-            self.groups = LightSyncGroups(self.music_assistant, self.ma_rooms, store.async_load, _save)
+            self.groups = RoomPlayers(self.music_assistant, self.ma_rooms, store.async_load, _save)
             await self.groups.async_start()
         else:
             self.groups.request()
@@ -186,11 +186,7 @@ class Hub:
         )
 
     def ma_rooms(self) -> list[Room]:
-        rooms = []
-        for controller in self.rooms.values():
-            speakers = controller.entry.options.get(CONF_SPEAKERS)
-            rooms.append(Room(controller.link.client_id, None if speakers is None else frozenset(speakers)))
-        return rooms
+        return [Room(c.link.client_id) for c in self.rooms.values() if c.link.client_id]
 
     # ------------------------------------------------------------ Music Assistant
 
@@ -209,12 +205,6 @@ class Hub:
         if self.music_assistant() is None:
             return None
         return getattr(self._api_client, "players", None)
-
-    def speaker_for(self) -> dict[str, str]:
-        """Light sync group player id -> its BluOS speaker's player id."""
-        if self.groups is None:
-            return {}
-        return {group_id: speaker_id for speaker_id, group_id in self.groups.mapping.items()}
 
     # ------------------------------------------------------------ shared shows
 

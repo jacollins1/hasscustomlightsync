@@ -20,7 +20,7 @@ Each **Music Light Sync** entry is one room: its own bulbs, layout, settings, an
 
 Rooms work together:
 
-- **Light sync players.** Music Assistant gets one **<speaker> - Light sync** player for every BluOS speaker (for example **Living Room - Light sync**): the speaker plus every light room that joined it. Play to that player and the speaker plays while the lights in those rooms run. The players follow their speakers: a new BluOS speaker gets one, a disabled speaker disables it, a removed speaker removes it. A speaker Music Assistant can't group with light players (in this house: Office and Outside) gets a player with just the speaker.
+- **Choosing rooms each time.** Group a room's light player with a speaker in Music Assistant: select the speaker (e.g. **Living Room**), open its group control and tick **Music Sync - Kitchen Lights** (and/or **Music Sync - Dining Room**). Play to the speaker; the ticked rooms light up. Untick to stop. From an automation, `media_player.join` on the speaker's Music Assistant entity with the light players as `group_members` does the same. Start from the speaker so it leads the group. (0.3.1–0.3.3 made a fixed **<speaker> - Light sync** player per speaker; 0.3.4 removes them.)
 - **Show with other rooms** (per room, when rooms play in the same group):
   - **House-wide:** the house-wide rooms draw one show across all their bulbs, placed by the floor plan, so a chase or wave runs from the kitchen into the dining room. It needs every bulb of those rooms pinned on the floor plan; a room that isn't fully pinned plays the shared show on its own bulbs instead. It is also the lightest on Zigbee: one show's hits instead of one per room, never more than six bulbs hit at the same instant (drops aside, which go out as one multicast per room).
   - **Mirrored** (default): same section, color pair, rhythm, rate and look length, changing on the same beat, each room on its own bulbs.
@@ -66,14 +66,14 @@ Rooms work together:
 
 ### Volume and intensity
 
-- **Following the volume.** The lights soften when you turn the music down. Volume is read from the speaker the room is playing with (the speaker of the **- Light sync** player, from Music Assistant; the status sensor's `following_speaker` attribute names it) and compared with the loudest setting used recently, not with a fixed number. A Node at 4 % into a loud amp counts as party volume; turning it down to half of that makes every rise take at least 0.3 s, with no flashes, and roughly halves the brightness swing. HA can't see the amplifier's own knob.
+- **Following the volume.** The lights soften when you turn the music down. Volume is read from the speaker the room is grouped with (from Music Assistant; the status sensor's `following_speaker` attribute names it) and compared with the loudest setting used recently, not with a fixed number. A Node at 4 % into a loud amp counts as party volume; turning it down to half of that makes every rise take at least 0.3 s, with no flashes, and roughly halves the brightness swing. HA can't see the amplifier's own knob.
 - **The Intensity control** (`number.<name>_intensity`, 10–100 %) caps the swing outright. Use about 40 % for dinner (gentle, no hard flashes below 60 %) and 100 % for a party.
 
 Timing jitter is about 50–150 ms. Zigbee allows only 10–20 frames per second before the rest of the house suffers, so this cannot match a Hue Sync Box's 25 Hz strobing.
 
 ## Requirements
 
-- Home Assistant 2026.10 or later with ZHA, and the Music Assistant integration (used for the Light sync players).
+- Home Assistant 2026.10 or later with ZHA, and the Music Assistant integration (used to read the speaker's volume and track timing).
 - Music Assistant 2.10.7 or later. It provides the Sendspin visualizer and color roles, and beat analysis through Smart Fades.
 - Color bulbs on ZHA. Built and tested for:
 
@@ -104,7 +104,7 @@ Timing jitter is about 50–150 ms. Zigbee allows only 10–20 frames per second
 
 | Path | How | Audio to the Node | Lights |
 |---|---|---|---|
-| **Synced** | Play to **Living Room - Light sync** (or group **Living Room** with any room's light player by hand) | AirPlay 2, capped at 24-bit/48 kHz | All effects, beat-accurate |
+| **Synced** | Group **Living Room** with the rooms' light players (e.g. **Music Sync - Kitchen Lights**) and play to **Living Room** | AirPlay 2, capped at 24-bit/48 kHz | All effects, beat-accurate |
 | **Native hi-res** | Play to **Living Room** alone | Native BluOS, full Tidal resolution | Off: the room's lights are left alone |
 
 The **Sync** switch arms the integration. While it is on and Music Assistant streams to the group:
@@ -122,7 +122,6 @@ If Home Assistant stops, the integration hands back first. If it crashes or lose
 | Bulb positions from | **Floor plan**: each bulb where it is pinned on the floor plan dashboard (`floorplan-positions`), re-read whenever the plan is saved. **Manual**: the layout text below. A new room starts on the floor plan when every bulb is pinned, otherwise on Manual; a Manual room switches to the floor plan by itself as soon as its last bulb is pinned. A pin made while the bulb's device was in another area doesn't count. The status sensor shows `layout` (floor plan / manual / row) and `unpinned_bulbs`. |
 | Bulb layout (manual) | Used with Manual. Where each bulb is in the room: one `x, y` line per bulb, 0–100 across and down as seen from above. Start a line with the bulb's entity id (`light.x: 22, 29`) so the order of the *Lights* list doesn't matter, or with its number in that list (`3: 76, 72`); lines without either fill the remaining bulbs in *Lights* order. Party mode builds its pairs, splits and chase paths from it. Without a layout the bulbs are treated as a row. The kitchen is below. |
 | ZHA group | Recommended. In ZHA, create a group with exactly this room's bulbs and pick it here. Whole-room changes (a drop's white flash) then take one multicast frame instead of one per bulb, which keeps drops on time. The option is refused if the group has other members. |
-| Light sync speakers | Which speakers' **- Light sync** players this room joins. All ticked (the default) also joins speakers added later. |
 | When this room plays with other rooms | House-wide, Mirrored (default) or Independent; see *Show with other rooms* above. |
 | Color format | Automatic: each bulb gets its native format (Hue: CIE xy; Third Reality: hue/saturation, the same thing its *Native hue/saturation color* quirk switch does). Nothing on the bulbs is switched during a show, so there is nothing to put back. If Hue and Third Reality bulbs don't match side by side, force **Hue/saturation for every bulb** or **CIE xy for every bulb**. A ZHA group mixing formats sends colors bulb by bulb. |
 | Zigbee frame budget | 20 frames/s for the whole house (the default). Rooms playing at the same time share it; the lowest value set in any room applies. The governor backs off by itself if the mesh gets congested. |

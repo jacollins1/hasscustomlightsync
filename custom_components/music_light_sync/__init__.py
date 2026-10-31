@@ -28,6 +28,7 @@ from .const import (
     CONF_MATCH_ROOMS,
     CONF_PAUSE_ENTITIES,
     CONF_SHOW_MODE,
+    CONF_SPEAKERS,
     DOMAIN,
     LAYOUT_FLOOR_PLAN,
     LAYOUT_MANUAL,
@@ -134,8 +135,9 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """1 -> 2: entries became rooms (record the area).
     2 -> 3: "match other rooms" became the show mode, the music player setting
     went (the room follows the speaker it plays with), and the layout source
-    starts on the floor plan when every bulb is pinned there."""
-    if entry.version > 3:
+    starts on the floor plan when every bulb is pinned there.
+    3 -> 4: the Light sync speakers option went with the Light sync players."""
+    if entry.version > 4:
         return False
     if entry.version == 1:
         area = room_area_of(hass, list(entry.data.get(CONF_LIGHTS, [])))
@@ -151,4 +153,8 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         options.setdefault(CONF_SHOW_MODE, SHOW_MIRRORED if match else SHOW_INDEPENDENT)
         hass.config_entries.async_update_entry(entry, options=options, version=3)
         _LOGGER.info("Migrated %s: show %s", entry.title, options[CONF_SHOW_MODE])
+    if entry.version == 3:
+        # The Light sync players are gone: rooms are grouped with speakers directly.
+        options = {k: v for k, v in entry.options.items() if k != CONF_SPEAKERS}
+        hass.config_entries.async_update_entry(entry, options=options, version=4)
     return True

@@ -35,7 +35,6 @@ from .const import (
     CONF_PORT,
     CONF_RATE_MAX,
     CONF_SHOW_MODE,
-    CONF_SPEAKERS,
     CONF_ZHA_GROUP_ID,
     DEFAULT_AMBIENT_PERIOD,
     DEFAULT_END_DELAY,
@@ -141,7 +140,7 @@ def _room_schema(defaults: dict[str, Any], *, with_area: bool) -> vol.Schema:
 class MusicLightSyncConfigFlow(ConfigFlow, domain=DOMAIN):
     """One entry per room: its bulbs, its Music Assistant player, its show."""
 
-    VERSION = 3
+    VERSION = 4
 
     def __init__(self) -> None:
         self._room: dict[str, Any] = {}
@@ -359,13 +358,6 @@ def _layout_error(hass: HomeAssistant, text: str | None, light_ids: list[str]) -
 class MusicLightSyncOptionsFlow(OptionsFlow):
     """Tuning and integration with the rest of the house."""
 
-    def _speakers(self) -> dict[str, str]:
-        """BluOS speakers in Music Assistant (id -> name), as last seen."""
-        from .hub import async_get_hub  # noqa: PLC0415
-
-        groups = async_get_hub(self.hass).groups
-        return dict(sorted((groups.speakers if groups else {}).items(), key=lambda kv: kv[1]))
-
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Single options page."""
         errors: dict[str, str] = {}
@@ -374,10 +366,6 @@ class MusicLightSyncOptionsFlow(OptionsFlow):
             data = dict(user_input)
             group = data.pop(CONF_ZHA_GROUP_ID, NO_GROUP)
             data[CONF_ZHA_GROUP_ID] = None if group == NO_GROUP else int(str(group), 0)
-            speakers = data.pop(CONF_SPEAKERS, None)
-            known = set(self._speakers())
-            # Every speaker ticked = "all", so speakers added later are joined too.
-            data[CONF_SPEAKERS] = None if speakers is None or (known and set(speakers) >= known) else list(speakers)
             if data[CONF_MIN_BRIGHTNESS] >= data[CONF_MAX_BRIGHTNESS]:
                 data[CONF_MIN_BRIGHTNESS] = max(1, data[CONF_MAX_BRIGHTNESS] - 10)
             layout_error = _layout_error(self.hass, data.get(CONF_LAYOUT), self.config_entry.data[CONF_LIGHTS])
@@ -441,18 +429,6 @@ class MusicLightSyncOptionsFlow(OptionsFlow):
                 )
             )
         )
-        speakers = self._speakers()
-        if speakers:
-            chosen = opts.get(CONF_SPEAKERS)
-            fields[vol.Optional(CONF_SPEAKERS, default=list(speakers) if chosen is None else list(chosen))] = (
-                selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=[selector.SelectOptionDict(value=k, label=v) for k, v in speakers.items()],
-                        multiple=True,
-                        mode=selector.SelectSelectorMode.LIST,
-                    )
-                )
-            )
         fields[vol.Required(CONF_LAYOUT_SOURCE, default=opts.get(CONF_LAYOUT_SOURCE, LAYOUT_MANUAL))] = (
             selector.SelectSelector(
                 selector.SelectSelectorConfig(

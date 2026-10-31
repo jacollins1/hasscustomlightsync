@@ -5,20 +5,22 @@ not the speaker's volume or the position in the track. Those come from Music
 Assistant's own player model (through the Home Assistant Music Assistant
 integration's live connection, no polling):
 
-* the room's light player is in a group (``active_group`` / ``synced_to``, or
-  a group that lists it and is playing);
-* that group's speaker is the BluOS player the "<speaker> - Light sync"
-  group belongs to, else the first member that has a volume;
+* the room's light player is grouped with a speaker (``synced_to`` /
+  ``active_group``, the light player leading a group, or a group that lists it
+  and is playing);
+* the speaker is the player leading that group (Living Room grouped with
+  Music Sync - Kitchen Lights), or for a group player the first member that
+  has a volume and isn't a light room;
 * volume comes from the speaker, the track and its timing from the group.
 
-So playing to "Sunroom - Light sync" makes the lights follow the Sunroom
+So grouping the kitchen lights with the Sunroom makes them follow the Sunroom
 speaker, with no setting to keep in step.
 """
 
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -56,6 +58,8 @@ def _group_of(players: PlayerLookup, room_id: str) -> Any:
     for group_id in (getattr(me, "active_group", None), getattr(me, "synced_to", None)):
         if group_id and (group := players.get(group_id)) is not None:
             return group
+    if [m for m in getattr(me, "group_members", None) or [] if m != room_id]:
+        return me  # the light player leads a group (the speaker was grouped onto it)
     playing = [
         p
         for p in players
@@ -64,9 +68,19 @@ def _group_of(players: PlayerLookup, room_id: str) -> Any:
     return playing[0] if playing else None
 
 
-def _speaker_of(players: PlayerLookup, group: Any, room_ids: set[str], speaker_for: Mapping[str, str]) -> Any:
-    if (speaker_id := speaker_for.get(group.player_id)) and (speaker := players.get(speaker_id)) is not None:
-        return speaker
+def _is_group_player(player: Any) -> bool:
+    kind = getattr(player, "type", None)
+    return str(getattr(kind, "value", kind) or "") == "group"
+
+
+def _speaker_of(players: PlayerLookup, group: Any, room_ids: set[str]) -> Any:
+    # Grouped on the fly (Living Room + Kitchen Lights): the leading speaker is the speaker.
+    if (
+        not _is_group_player(group)
+        and group.player_id not in room_ids
+        and getattr(group, "volume_level", None) is not None
+    ):
+        return group
     for member_id in getattr(group, "group_members", None) or []:
         if member_id in room_ids or member_id == group.player_id:
             continue
@@ -81,7 +95,6 @@ def music_context(
     room_id: str | None,
     *,
     room_ids: Iterable[str] = (),
-    speaker_for: Mapping[str, str] | None = None,
     now: Callable[[], float] = time.time,
 ) -> MusicContext | None:
     """The room's music context, or None when Music Assistant doesn't know the room."""
@@ -93,7 +106,7 @@ def music_context(
         return None
     speaker = None
     if group is not None:
-        speaker = _speaker_of(players, group, {room_id, *room_ids}, speaker_for or {})
+        speaker = _speaker_of(players, group, {room_id, *room_ids})
 
     volume = None
     if speaker is not None and getattr(speaker, "volume_level", None) is not None:

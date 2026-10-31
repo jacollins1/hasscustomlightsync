@@ -471,7 +471,7 @@ class LightSyncController:
             "paused_during_show": self.pause_targets(),
             "following_speaker": self._speaker_name(),
             "color_formats": sorted({f"{b.model or '?'}: {b.color_format}" for b in self.bulbs}),
-            "light_sync_groups_error": self.hub.groups.last_error if self.hub.groups else None,
+            "music_assistant_error": self.hub.groups.last_error if self.hub.groups else None,
             "zigbee_rtt_ms": None if gov.rtt_s is None else round(gov.rtt_s * 1000),
             "lead_ms": round(self._lead_us() / 1000),
             "frames_sent": gov.stats.sent,
@@ -860,15 +860,15 @@ class LightSyncController:
             hub.players(),
             self.link.client_id,
             room_ids=[c.link.client_id for c in hub.rooms.values() if c.link.client_id],
-            speaker_for=hub.speaker_for(),
         )
 
     def _speaker_name(self) -> str | None:
         context = self._music()
         if context is None or context.speaker_id is None:
             return None
-        hub = self.hub
-        return (hub.groups.speakers.get(context.speaker_id) if hub.groups else None) or context.speaker_id
+        players = self.hub.players()
+        speaker = players.get(context.speaker_id) if players is not None else None
+        return getattr(speaker, "name", None) or context.speaker_id
 
     @callback
     def _update_music_context(self) -> None:

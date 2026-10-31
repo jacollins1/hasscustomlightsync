@@ -1,4 +1,4 @@
-"""'<speaker> - Light sync' players kept in step with Music Assistant's BluOS speakers."""
+"""The rooms' players in Music Assistant: shown once; the old Light sync groups removed."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from custom_components.music_light_sync.ma_groups import LightSyncGroups, Room
+from custom_components.music_light_sync.ma_groups import Room, RoomPlayers
 
 LIVING, OFFICE, SUNROOM = "90568298A7D8", "905682433636", "90568241A436"
 KITCHEN, DINING = "EzDwweg6C1289aBYgXle8EoXRDG9Gc3degC6AbYpK20", "dining-visualizer"
@@ -105,24 +105,34 @@ def house() -> FakeMusicAssistant:
     ma = FakeMusicAssistant()
     ma.speaker(LIVING, "Living Room", [OFFICE, SUNROOM, KITCHEN, DINING])
     ma.speaker(SUNROOM, "Sunroom", [LIVING, OFFICE, KITCHEN, DINING])
-    ma.speaker(OFFICE, "Office", [LIVING, SUNROOM])  # can't group with light players
-    ma.visualizer(KITCHEN, "Kitchen Lights")
-    ma.group("syncgroup_u8hz94fm", "Living Room - Light sync", [LIVING, KITCHEN])  # made by hand earlier
+    ma.speaker(OFFICE, "Office", [LIVING, SUNROOM])
+    ma.visualizer(KITCHEN, "Music Sync - Kitchen Lights")
+    ma.visualizer(DINING, "Music Sync - Dining Room")
+    # What 0.3.3 left behind (the Living Room one was made by hand and adopted).
+    ma.group("syncgroup_u8hz94fm", "Living Room - Light sync", [LIVING, KITCHEN, DINING])
+    ma.group("syncgroup_wxilcei8", "Sunroom - Light sync", [SUNROOM, KITCHEN, DINING])
+    ma.group("syncgroup_uachoch9", "Office - Light sync", [OFFICE])
     return ma
 
 
-_MANAGERS: list[LightSyncGroups] = []
+STORED_033 = {
+    "groups": {LIVING: "syncgroup_u8hz94fm", SUNROOM: "syncgroup_wxilcei8", OFFICE: "syncgroup_uachoch9"},
+    "rooms": [KITCHEN, DINING],
+    "revealed": [KITCHEN],
+}
+
+_MANAGERS: list[RoomPlayers] = []
 
 
 @pytest.fixture(autouse=True)
 async def _stop_managers():
     yield
-    for groups in _MANAGERS:
-        await groups.async_stop()
+    for players in _MANAGERS:
+        await players.async_stop()
     _MANAGERS.clear()
 
 
-def manager(ma: FakeMusicAssistant, rooms: list[Room], stored: dict | None = None) -> tuple[LightSyncGroups, dict]:
+def manager(ma: FakeMusicAssistant, rooms: list[Room], stored: dict | None = None) -> tuple[RoomPlayers, dict]:
     saved: dict[str, Any] = {"value": stored}
 
     async def load() -> dict | None:
@@ -131,110 +141,41 @@ def manager(ma: FakeMusicAssistant, rooms: list[Room], stored: dict | None = Non
     async def save(value: dict) -> None:
         saved["value"] = value
 
-    groups = LightSyncGroups(lambda: ma, lambda: rooms, load, save)
-    _MANAGERS.append(groups)
-    return groups, saved
+    players = RoomPlayers(lambda: ma, lambda: rooms, load, save)
+    _MANAGERS.append(players)
+    return players, saved
 
 
-async def test_one_group_per_speaker_existing_one_adopted(house: FakeMusicAssistant) -> None:
-    groups, saved = manager(house, [Room(KITCHEN, None)])
-    groups.mapping = {}
-    await groups.async_reconcile()
-    by_name = house.groups_by_name()
-    assert set(by_name) == {"Living Room - Light sync", "Sunroom - Light sync", "Office - Light sync"}
-    assert by_name["Living Room - Light sync"] == "syncgroup_u8hz94fm"  # adopted, not duplicated
-    assert house.members(by_name["Sunroom - Light sync"]) == [SUNROOM, KITCHEN]
-    assert house.members(by_name["Office - Light sync"]) == [OFFICE]  # lights can't group with it
-    assert saved["value"]["groups"][LIVING] == "syncgroup_u8hz94fm"
-    # Nothing to do the second time.
+async def test_old_light_sync_groups_are_removed(house: FakeMusicAssistant) -> None:
+    house.group("syncgroup_party", "Party", [LIVING, KITCHEN])  # someone's own group: kept
+    house.group("syncgroup_other", "Garage - Light sync", [LIVING, "some-other-player"])  # not ours: kept
+    players, saved = manager(house, [Room(KITCHEN), Room(DINING)], copy.deepcopy(STORED_033))
+    await players.async_start()
+    players._pending.cancel()  # noqa: SLF001 - run it now instead of after the debounce
+    await players.async_reconcile()
+    assert set(house.groups_by_name()) == {"Party", "Garage - Light sync"}
+    assert sorted(players.removed) == ["Living Room - Light sync", "Office - Light sync", "Sunroom - Light sync"]
+    assert saved["value"]["legacy_groups"] == []
     house.calls.clear()
-    await groups.async_reconcile()
-    assert house.changes() == []
+    await players.async_reconcile()
+    assert house.changes() == []  # nothing left to do
 
 
-async def test_rooms_join_only_their_speakers_and_keep_hand_added_members(house: FakeMusicAssistant) -> None:
-    house.visualizer(DINING, "Dining Room Lights")
-    house.configs["syncgroup_u8hz94fm"]["values"]["group_members"]["value"] = [LIVING, KITCHEN, SUNROOM]
-    groups, _ = manager(house, [Room(KITCHEN, frozenset({SUNROOM})), Room(DINING, None)])
-    await groups.async_reconcile()
-    living = house.groups_by_name()["Living Room - Light sync"]
-    assert house.members(living) == [LIVING, SUNROOM, DINING]  # kitchen opted out; sunroom was added by hand
-    sunroom = house.members(house.groups_by_name()["Sunroom - Light sync"])
-    assert sunroom[0] == SUNROOM and set(sunroom) == {SUNROOM, DINING, KITCHEN}  # speaker leads
-
-
-async def test_disable_and_enable_follow_the_speaker(house: FakeMusicAssistant) -> None:
-    groups, _ = manager(house, [Room(KITCHEN, None)])
-    await groups.async_reconcile()
-    sunroom_group = house.groups_by_name()["Sunroom - Light sync"]
-    house.configs[SUNROOM]["enabled"] = False
-    del house.live[SUNROOM]
-    await groups.async_reconcile()
-    assert house.configs[sunroom_group]["enabled"] is False
-    assert house.members(sunroom_group) == [SUNROOM, KITCHEN]  # membership kept while disabled
-    house.configs[SUNROOM]["enabled"] = True
-    house.live[SUNROOM] = {"player_id": SUNROOM, "can_group_with": [KITCHEN]}
-    await groups.async_reconcile()
-    assert house.configs[sunroom_group]["enabled"] is True
-
-
-async def test_new_speaker_gets_a_group_and_a_removed_one_loses_it(house: FakeMusicAssistant) -> None:
-    groups, _ = manager(house, [Room(KITCHEN, None)])
-    await groups.async_reconcile()
-    house.speaker("90568246FC38", "Fancy Room", [KITCHEN])
-    await groups.async_reconcile()
-    fancy = house.groups_by_name()["Fancy Room - Light sync"]
-    assert house.members(fancy) == ["90568246FC38", KITCHEN]
-    # Removed from Music Assistant (config gone, event received).
-    del house.configs["90568246FC38"]
-    del house.live["90568246FC38"]
-    groups._on_event("player_removed", "90568246FC38")  # noqa: SLF001
-    groups._pending.cancel()  # noqa: SLF001 - run it now instead of after the debounce
-    await groups.async_reconcile()
-    assert fancy not in house.configs
-    assert "90568246FC38" not in groups.mapping
-
-
-async def test_provider_restart_is_not_a_removal(house: FakeMusicAssistant) -> None:
-    groups, _ = manager(house, [Room(KITCHEN, None)])
-    await groups.async_reconcile()
-    sunroom_group = house.groups_by_name()["Sunroom - Light sync"]
-    # BluOS provider reloading: its configs are briefly not listed, and no removal event came.
-    house.providers[0]["available"] = False
-    saved = house.configs.pop(SUNROOM)
-    await groups.async_reconcile()
-    assert sunroom_group in house.configs
-    house.configs[SUNROOM] = saved
-    house.providers[0]["available"] = True
-
-
-async def test_deleted_room_leaves_every_group(house: FakeMusicAssistant) -> None:
-    rooms = [Room(KITCHEN, None)]
-    groups, _ = manager(house, rooms)
-    await groups.async_reconcile()
-    rooms.clear()  # the Kitchen entry was deleted
-    await groups.async_reconcile()
-    assert house.members(house.groups_by_name()["Living Room - Light sync"]) == [LIVING]
-    assert house.members(house.groups_by_name()["Sunroom - Light sync"]) == [SUNROOM]
-
-
-async def test_renamed_speaker_renames_its_group(house: FakeMusicAssistant) -> None:
-    groups, _ = manager(house, [Room(KITCHEN, None)])
-    await groups.async_reconcile()
-    house.configs[SUNROOM]["name"] = "Porch"
-    await groups.async_reconcile()
-    assert "Porch - Light sync" in house.groups_by_name()
+async def test_light_sync_groups_are_found_without_the_stored_record(house: FakeMusicAssistant) -> None:
+    players, _ = manager(house, [Room(KITCHEN), Room(DINING)])
+    await players.async_reconcile()
+    assert house.groups_by_name() == {}  # named "- Light sync", only speakers and light rooms in them
 
 
 async def test_room_players_are_shown_once(house: FakeMusicAssistant) -> None:
-    house.visualizer(DINING, "Music Sync - Dining Room")
     house.configs[DINING]["values"] = {"hide_in_ui": {"key": "hide_in_ui", "value": True}}
-    groups, saved = manager(house, [Room(KITCHEN, None), Room(DINING, None)])
-    await groups.async_reconcile()
+    players, saved = manager(house, [Room(KITCHEN), Room(DINING)], {"legacy_groups": [], "revealed": [KITCHEN]})
+    await players.async_start()
+    players._pending.cancel()  # noqa: SLF001
+    await players.async_reconcile()
     assert ("config/players/save", {"player_id": DINING, "values": {"hide_in_ui": False}}) in house.calls
     assert saved["value"]["revealed"] == sorted([KITCHEN, DINING])
-    # Hidden again by hand: left hidden.
-    house.configs[DINING]["values"]["hide_in_ui"]["value"] = True
+    house.configs[DINING]["values"]["hide_in_ui"]["value"] = True  # hidden again by hand: left hidden
     house.calls.clear()
-    await groups.async_reconcile()
-    assert house.changes() == []
+    await players.async_reconcile()
+    assert ("config/players/save", {"player_id": DINING, "values": {"hide_in_ui": False}}) not in house.calls

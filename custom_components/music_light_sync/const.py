@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Final
 
 DOMAIN: Final = "music_light_sync"
-VERSION: Final = "0.3.3"
+VERSION: Final = "0.3.4"
 
 # Config entry data
 CONF_HOST: Final = "host"
@@ -31,7 +31,7 @@ CONF_SHOW_MODE: Final = "show_mode"  # house | mirrored | independent
 CONF_LAYOUT_SOURCE: Final = "layout_source"  # floor_plan | manual
 CONF_COLOR_FORMAT: Final = "color_format"  # auto | hs | xy
 CONF_PAUSE_ADAPTIVE: Final = "pause_adaptive_lighting"  # pause the room's Adaptive Lighting switches
-CONF_SPEAKERS: Final = "light_sync_speakers"  # BluOS players whose Light sync group this room joins
+CONF_SPEAKERS: Final = "light_sync_speakers"  # removed in 0.3.4 (migration only)
 
 COLOR_FORMAT_AUTO: Final = "auto"
 SHOW_HOUSE: Final = "house"  # rooms playing together draw one show across all their bulbs
