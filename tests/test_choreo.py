@@ -149,6 +149,23 @@ def test_any_room_size_partitions_every_bulb(count: int) -> None:
         assert sorted(order) == list(range(count))
 
 
+def test_layout_lines_can_name_their_bulb() -> None:
+    ids = [f"light.dinning_room_overhead_bulb_{i}" for i in (3, 1, 4, 2)]  # Lights list in any order
+    text = """light.dinning_room_overhead_bulb_1: 22, 29
+light.dinning_room_overhead_bulb_2: 76, 29
+light.dinning_room_overhead_bulb_3: 76, 72
+light.dinning_room_overhead_bulb_4: 22, 73"""
+    assert parse_layout(text, ids) == [(0.76, 0.72), (0.22, 0.29), (0.22, 0.73), (0.76, 0.29)]
+    mixed = parse_layout("50, 50\ndinning_room_overhead_bulb_1: 22, 29\n3: 76, 72\n1, 1", ids)
+    assert mixed == [(0.5, 0.5), (0.22, 0.29), (0.76, 0.72), (0.01, 0.01)]  # unnamed lines fill the gaps
+    with pytest.raises(ValueError, match="not one of"):
+        parse_layout("light.kitchen_1: 1, 1\n1, 1\n1, 1\n1, 1", ids)
+    with pytest.raises(ValueError, match="no position"):
+        parse_layout("light.dinning_room_overhead_bulb_1: 22, 29", ids)
+    with pytest.raises(ValueError, match="two positions"):
+        parse_layout("1: 1, 1\n1: 2, 2\n3, 3\n4, 4", ids)
+
+
 def test_parse_layout() -> None:
     assert parse_layout("43, 13\n22, 36\n62, 48\n23, 65\n63, 81", 5) == [
         (0.43, 0.13),

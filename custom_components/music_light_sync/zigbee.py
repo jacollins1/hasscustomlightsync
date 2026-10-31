@@ -155,16 +155,44 @@ def room_area_of(hass: HomeAssistant, light_ids: list[str]) -> str | None:
     return max(counts, key=lambda a: counts[a]) if counts else None
 
 
-def _members(hass: HomeAssistant, entity_ids: list[str], depth: int = 0) -> set[str]:
-    """Entity ids plus the members of any light groups among them (best effort)."""
-    found = set(entity_ids)
+_ZHA_GROUP_UNIQUE_ID = re.compile(r"_zha_group_0x(?P<gid>[0-9a-fA-F]{1,4})$")
+
+
+def _zha_group_ieees(hass: HomeAssistant, group_id: int) -> set[str]:
+    """IEEE addresses of a ZHA group's members (empty if ZHA isn't loaded)."""
+    try:
+        from homeassistant.components.zha.helpers import get_zha_gateway  # noqa: PLC0415
+
+        group = get_zha_gateway(hass).groups.get(group_id)
+    except Exception:  # noqa: BLE001 - ZHA not loaded
+        return set()
+    if group is None:
+        return set()
+    return {str(m.device.ieee).lower() for m in group.members}
+
+
+def _ieees(hass: HomeAssistant, entity_ids: list[str], depth: int = 0) -> set[str]:
+    """The Zigbee devices behind lights: ZHA lights, ZHA group lights and light group helpers.
+
+    ZHA group lights have no member list in their state (unlike group helpers),
+    so their members come from ZHA itself. Best effort; unknown lights add nothing.
+    """
+    registry = er.async_get(hass)
+    found: set[str] = set()
     if depth > 3:
         return found
     for entity_id in entity_ids:
+        entry = registry.async_get(entity_id)
+        if entry is not None and entry.platform == "zha":
+            if match := _ZHA_UNIQUE_ID.match(entry.unique_id):
+                found.add(match["ieee"].lower())
+            elif match := _ZHA_GROUP_UNIQUE_ID.search(entry.unique_id):
+                found |= _zha_group_ieees(hass, int(match["gid"], 16))
+            continue
         state = hass.states.get(entity_id)
         members = state.attributes.get("entity_id") if state else None
         if isinstance(members, list | tuple):
-            found |= _members(hass, list(members), depth + 1)
+            found |= _ieees(hass, list(members), depth + 1)
     return found
 
 
@@ -178,14 +206,16 @@ def adaptive_lighting_switches(hass: HomeAssistant, light_ids: list[str]) -> lis
     options. Each entry has four switches; the main one is the one whose unique
     id has no "_sleep_mode" / "_adapt_color" / "_adapt_brightness" suffix (its
     unique id is the configured name, which can differ from the entry title).
+    Lights are compared by Zigbee device, so an entry that lists the room's ZHA
+    group light (or a group helper) matches a room that lists the bulbs.
     """
-    ours = _members(hass, light_ids)
+    ours = _ieees(hass, light_ids)
     registry = er.async_get(hass)
     found: list[str] = []
     for entry in hass.config_entries.async_entries("adaptive_lighting"):
         conf = {**entry.data, **entry.options}
         lights = list(conf.get("lights") or [])
-        if not lights or not (_members(hass, lights) & ours):
+        if not lights or not (_ieees(hass, lights) & ours):
             continue
         for reg in er.async_entries_for_config_entry(registry, entry.entry_id):
             if reg.domain == "switch" and not reg.unique_id.endswith(_AL_SUFFIXES):

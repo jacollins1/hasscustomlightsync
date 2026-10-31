@@ -119,25 +119,56 @@ class Session(StrEnum):
     FALLBACK = "fallback"
 
 
-def parse_layout(text: str | None, count: int) -> list[tuple[float, float]] | None:
-    """Bulb positions from "x, y" lines (0-100, bulb order). None if absent or invalid."""
+def parse_layout(text: str | None, bulbs: int | list[str]) -> list[tuple[float, float]] | None:
+    """Bulb positions (0..1) in bulb order, from lines of "x, y" (0-100).
+
+    A line may name its bulb: "light.dining_bulb_1: 22, 29" (entity id, so the
+    order of the Lights list doesn't matter) or "3: 76, 72" (bulb number in the
+    Lights list). Lines without a name fill the other bulbs in Lights order. ``bulbs`` is the
+    room's light entity ids in order (or just their count). None if no text.
+    """
     if not text or not text.strip():
         return None
-    points: list[tuple[float, float]] = []
-    for line in text.replace(";", "\n").splitlines():
-        line = line.strip()
+    ids = [f"#{i}" for i in range(bulbs)] if isinstance(bulbs, int) else list(bulbs)
+    count = len(ids)
+    by_object_id = {e.split(".", 1)[-1]: i for i, e in enumerate(ids)}
+    points: list[tuple[float, float] | None] = [None] * count
+    unnamed: list[tuple[float, float]] = []
+    for raw in text.replace(";", "\n").splitlines():
+        line = raw.strip()
         if not line:
             continue
-        if ":" in line:  # allow "1: 43, 13"
-            line = line.split(":", 1)[1]
+        key = None
+        if ":" in line:
+            key, line = (p.strip() for p in line.split(":", 1))
         parts = [p for p in line.replace(" ", ",").split(",") if p]
         if len(parts) != 2:
-            raise ValueError(f"'{line}' is not 'x, y'")
-        x, y = float(parts[0]), float(parts[1])
-        points.append((x / 100, y / 100))
-    if len(points) != count:
-        raise ValueError(f"{len(points)} positions for {count} bulbs")
-    return points
+            raise ValueError(f"'{raw.strip()}' is not 'x, y'")
+        point = (float(parts[0]) / 100, float(parts[1]) / 100)
+        if key is None:
+            unnamed.append(point)
+            continue
+        if key.isdigit():
+            index = int(key) - 1
+            if not 0 <= index < count:
+                raise ValueError(f"there is no bulb {key} (the room has {count})")
+        elif (found := by_object_id.get(key.split(".", 1)[-1])) is None:
+            raise ValueError(f"{key} is not one of this room's lights")
+        else:
+            index = found
+        if points[index] is not None:
+            raise ValueError(f"two positions for {ids[index] if not key.isdigit() else key}")
+        points[index] = point
+    # Lines without a name fill the remaining bulbs in Lights order.
+    free = [i for i, p in enumerate(points) if p is None]
+    if len(unnamed) > len(free):
+        raise ValueError(f"{len(unnamed) - len(free)} more positions than bulbs")
+    for index, point in zip(free, unnamed, strict=False):
+        points[index] = point
+    if any(p is None for p in points):
+        missing = [ids[i] if not isinstance(bulbs, int) else str(i + 1) for i, p in enumerate(points) if p is None]
+        raise ValueError(f"no position for {', '.join(missing)}")
+    return [p for p in points if p is not None]
 
 
 def _pct_to_level(pct: float) -> int:
@@ -257,7 +288,7 @@ class LightSyncController:
             self.area_id = room_area_of(self.hass, [b.entity_id for b in self.bulbs])
         self.output = ZhaOutput(self.hass, self.bulbs, self.group_id)
         try:
-            layout = parse_layout(self._layout_text, len(self.bulbs))
+            layout = parse_layout(self._layout_text, [b.entity_id for b in self.bulbs])
         except ValueError as err:
             _LOGGER.warning("%s: ignoring bulb layout (%s); using configured order", self.name, err)
             layout = None

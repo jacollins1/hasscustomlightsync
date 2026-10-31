@@ -92,6 +92,7 @@ class LightSyncGroups:
         self._save = save
         self.mapping: dict[str, str] = {}  # BluOS player id -> its group's player id
         self.known_rooms: set[str] = set()  # every room player we ever added (to remove it later)
+        self.revealed: set[str] = set()  # room players we un-hid once (a later hide is the user's call)
         self._api: MusicAssistantApi | None = None
         self._unsub: Callable[[], None] | None = None
         self._pending: asyncio.TimerHandle | None = None
@@ -106,6 +107,7 @@ class LightSyncGroups:
         if "groups" in stored:
             self.mapping = dict(stored["groups"])
             self.known_rooms = set(stored.get("rooms", []))
+            self.revealed = set(stored.get("revealed", []))
         else:  # 0.3.1 pre-release format: just the mapping
             self.mapping = {k: v for k, v in stored.items() if isinstance(v, str)}
         self.request()
@@ -196,6 +198,17 @@ class LightSyncGroups:
         self.known_rooms |= current
         self.speakers = {c["player_id"]: _name(c) for c in speakers}
 
+        # Music Assistant hides visualizer players by default. Show each room's
+        # player once so it can be found, played to and grouped by hand.
+        for room in rooms:
+            if room.player_id in self.revealed:
+                continue
+            if _value(by_id[room.player_id], "hide_in_ui"):
+                _LOGGER.info("Showing %s in Music Assistant", _name(by_id[room.player_id]))
+                await api.command("config/players/save", player_id=room.player_id, values={"hide_in_ui": False})
+            self.revealed.add(room.player_id)
+            changed = True
+
         # Speakers gone from Music Assistant: remove their groups. Only when the
         # speaker provider is up (a provider restart is not a removal), or when
         # Music Assistant told us the player was removed.
@@ -282,7 +295,9 @@ class LightSyncGroups:
                 await api.command("config/players/save", player_id=group_id, values=update)
 
         if changed:
-            await self._save({"groups": dict(self.mapping), "rooms": sorted(self.known_rooms)})
+            await self._save(
+                {"groups": dict(self.mapping), "rooms": sorted(self.known_rooms), "revealed": sorted(self.revealed)}
+            )
 
 
 class ClientApi:

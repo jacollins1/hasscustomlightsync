@@ -224,3 +224,17 @@ async def test_renamed_speaker_renames_its_group(house: FakeMusicAssistant) -> N
     house.configs[SUNROOM]["name"] = "Porch"
     await groups.async_reconcile()
     assert "Porch - Light sync" in house.groups_by_name()
+
+
+async def test_room_players_are_shown_once(house: FakeMusicAssistant) -> None:
+    house.visualizer(DINING, "Music Sync - Dining Room")
+    house.configs[DINING]["values"] = {"hide_in_ui": {"key": "hide_in_ui", "value": True}}
+    groups, saved = manager(house, [Room(KITCHEN, None), Room(DINING, None)])
+    await groups.async_reconcile()
+    assert ("config/players/save", {"player_id": DINING, "values": {"hide_in_ui": False}}) in house.calls
+    assert saved["value"]["revealed"] == sorted([KITCHEN, DINING])
+    # Hidden again by hand: left hidden.
+    house.configs[DINING]["values"]["hide_in_ui"]["value"] = True
+    house.calls.clear()
+    await groups.async_reconcile()
+    assert house.changes() == []

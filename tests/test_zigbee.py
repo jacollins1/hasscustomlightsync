@@ -202,3 +202,38 @@ async def test_xy_frames_bypass_a_quirk_that_rewrites_them(hass: HomeAssistant) 
         assert [cmd for _cluster, cmd, _data in frames] == [0x07, 0x06]
     finally:
         patcher.stop()
+
+
+async def test_adaptive_lighting_found_through_a_zha_group_light(hass: HomeAssistant) -> None:
+    """The house's AL entries list ZHA group lights, which have no member list in their state."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    from custom_components.music_light_sync.zigbee import adaptive_lighting_switches
+
+    registry = er.async_get(hass)
+    bulbs = [
+        registry.async_get_or_create("light", "zha", f"c8:90:a8:1e:ac:71:00:0{i}-1", suggested_object_id=f"tr{i}")
+        for i in range(1, 5)
+    ]
+    group_light = registry.async_get_or_create("light", "zha", "light_zha_group_0x0005", suggested_object_id="grp")
+    hass.states.async_set(group_light.entity_id, "on", {})  # no "entity_id" attribute
+    sconces = registry.async_get_or_create("light", "zwave_js", "sconce", suggested_object_id="sconces")
+
+    al = MockConfigEntry(domain="adaptive_lighting", options={"lights": [sconces.entity_id, group_light.entity_id]})
+    al.add_to_hass(hass)
+    main = registry.async_get_or_create("switch", "adaptive_lighting", "Kitchen Island", config_entry=al)
+    registry.async_get_or_create("switch", "adaptive_lighting", "Kitchen Island_sleep_mode", config_entry=al)
+    other = MockConfigEntry(domain="adaptive_lighting", options={"lights": ["light.office"]})
+    other.add_to_hass(hass)
+    registry.async_get_or_create("switch", "adaptive_lighting", "Office", config_entry=other)
+
+    members = [
+        SimpleNamespace(device=SimpleNamespace(ieee=t.EUI64.convert(f"c8:90:a8:1e:ac:71:00:0{i}")), endpoint_id=1)
+        for i in range(1, 5)
+    ]
+    gateway = SimpleNamespace(groups={5: SimpleNamespace(members=members)})
+    with patch("homeassistant.components.zha.helpers.get_zha_gateway", return_value=gateway):
+        assert adaptive_lighting_switches(hass, [b.entity_id for b in bulbs]) == [main.entity_id]
+        assert adaptive_lighting_switches(hass, [bulbs[2].entity_id]) == [main.entity_id]  # one bulb is enough
+    with patch("homeassistant.components.zha.helpers.get_zha_gateway", side_effect=KeyError):
+        assert adaptive_lighting_switches(hass, [b.entity_id for b in bulbs]) == []  # ZHA not loaded

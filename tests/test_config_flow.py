@@ -57,7 +57,16 @@ def _bulb(hass: HomeAssistant, object_id: str, ieee: str, model: str, maker: str
     return entry.entity_id
 
 
-async def test_add_room_defaults_to_the_areas_color_lights(hass: HomeAssistant) -> None:
+def _suggested(result: dict) -> dict:
+    """The values a form shows pre-filled."""
+    return {
+        str(key): key.description["suggested_value"]
+        for key in result["data_schema"].schema
+        if isinstance(key.description, dict) and "suggested_value" in key.description
+    }
+
+
+async def test_add_room_prefills_name_and_the_areas_color_lights(hass: HomeAssistant) -> None:
     dining = ar.async_get(hass).async_create("Dining Room")
     lights = [
         _bulb(hass, f"dining_{i}", f"00:00:00:00:00:00:00:0{i}", "3RCB01057Z", "Third Reality, Inc", dining.id)
@@ -66,13 +75,23 @@ async def test_add_room_defaults_to_the_areas_color_lights(hass: HomeAssistant) 
     _bulb(hass, "kitchen_1", "00:17:88:01:0b:00:00:01", "LCB002", "Signify Netherlands B.V.")  # other room
     result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
     assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "user"
     assert CONF_HOST in result["data_schema"].schema  # first room: asks for Music Assistant
-    with patch(CAN_CONNECT, return_value=True), patch(SETUP, return_value=True):
+    assert CONF_LIGHTS not in result["data_schema"].schema  # lights come after the room is known
+    with patch(CAN_CONNECT, return_value=True):
         result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_AREA: dining.id, **CONNECTION})
+    assert result["step_id"] == "room"
+    assert _suggested(result) == {CONF_NAME: "Music Sync - Dining Room", CONF_LIGHTS: sorted(lights)}
+    with patch(SETUP, return_value=True):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_NAME: "Music Sync - Dining Room", CONF_LIGHTS: sorted(lights)}
+        )
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["title"] == "Dining Room Lights"
+    assert result["title"] == "Music Sync - Dining Room"
+    assert result["data"][CONF_NAME] == "Music Sync - Dining Room"
     assert result["data"][CONF_LIGHTS] == sorted(lights)
     assert result["data"][CONF_AREA] == dining.id
+    assert result["data"][CONF_HOST] == CONNECTION[CONF_HOST]
     assert len(result["data"][CONF_IDENTITY]) == 64
     assert result["options"] == {CONF_MATCH_ROOMS: True, CONF_COLOR_FORMAT: "auto"}
 
@@ -85,9 +104,9 @@ async def test_second_room_reuses_the_connection_and_warns_on_untested_bulbs(has
     odd = _bulb(hass, "lamp", "aa:aa:aa:aa:aa:aa:aa:aa", "LCT015", "Signify Netherlands B.V.", office.id)
     result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
     assert CONF_HOST not in result["data_schema"].schema
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {CONF_AREA: office.id, CONF_NAME: "Desk"}
-    )
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_AREA: office.id})
+    assert _suggested(result)[CONF_LIGHTS] == [odd]
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_NAME: "Desk", CONF_LIGHTS: [odd]})
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "unsupported"
     assert "LCT015" in result["description_placeholders"]["bulbs"]
@@ -103,18 +122,31 @@ async def test_add_room_errors(hass: HomeAssistant) -> None:
     empty = ar.async_get(hass).async_create("Garage")
     er.async_get(hass).async_get_or_create("light", "hue", "x", suggested_object_id="wifi")
     result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
-    result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_AREA: empty.id, **CONNECTION})
+    with patch(CAN_CONNECT, return_value=False):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_AREA: empty.id, **CONNECTION})
+    assert result["errors"] == {"base": "cannot_connect"}
+    with patch(CAN_CONNECT, return_value=True):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_AREA: empty.id, **CONNECTION})
+    assert result["step_id"] == "room"
+    assert _suggested(result)[CONF_LIGHTS] == []  # nothing in the garage
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_NAME: "G", CONF_LIGHTS: []})
     assert result["errors"] == {CONF_LIGHTS: "no_lights"}
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {CONF_AREA: empty.id, CONF_LIGHTS: ["light.wifi"], **CONNECTION}
+        result["flow_id"], {CONF_NAME: "G", CONF_LIGHTS: ["light.wifi"]}
     )
     assert result["errors"] == {CONF_LIGHTS: "not_zha"}
-    light = _bulb(hass, "k", "00:17:88:01:0b:00:00:01", "LCB002", "Signify Netherlands B.V.")
-    with patch(CAN_CONNECT, return_value=False):
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], {CONF_AREA: empty.id, CONF_LIGHTS: [light], **CONNECTION}
-        )
-    assert result["errors"] == {"base": "cannot_connect"}
+
+
+async def test_a_room_can_only_be_added_once(hass: HomeAssistant) -> None:
+    kitchen = ar.async_get(hass).async_create("Kitchen")
+    MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        data={**CONNECTION, CONF_NAME: "K", CONF_LIGHTS: [], CONF_IDENTITY: "00" * 32, CONF_AREA: kitchen.id},
+    ).add_to_hass(hass)
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_AREA: kitchen.id})
+    assert result["errors"] == {CONF_AREA: "area_taken"}
 
 
 async def test_reconfigure_changes_lights_and_keeps_the_player(hass: HomeAssistant) -> None:

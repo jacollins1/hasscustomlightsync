@@ -99,16 +99,21 @@ def _lights_in_area(hass: HomeAssistant, area_id: str) -> list[str]:
     return sorted(dict.fromkeys(found))
 
 
-def _room_schema(hass: HomeAssistant, defaults: dict[str, Any]) -> vol.Schema:
-    return vol.Schema(
-        {
-            vol.Required(CONF_AREA, default=defaults.get(CONF_AREA) or vol.UNDEFINED): selector.AreaSelector(),
-            vol.Optional(CONF_NAME, description={"suggested_value": defaults.get(CONF_NAME)}): str,
-            vol.Optional(
-                CONF_LIGHTS, description={"suggested_value": defaults.get(CONF_LIGHTS)}
-            ): selector.EntitySelector(selector.EntitySelectorConfig(domain="light", multiple=True)),
-        }
+def default_room_name(area_name: str) -> str:
+    """ "Dining Room" -> "Music Sync - Dining Room" (entry title and Music Assistant player)."""
+    return f"Music Sync - {area_name}"
+
+
+def _room_schema(defaults: dict[str, Any], *, with_area: bool) -> vol.Schema:
+    """Name and lights (pre-filled), plus the area when reconfiguring."""
+    fields: dict[Any, Any] = {}
+    if with_area:
+        fields[vol.Required(CONF_AREA, default=defaults.get(CONF_AREA) or vol.UNDEFINED)] = selector.AreaSelector()
+    fields[vol.Required(CONF_NAME, description={"suggested_value": defaults.get(CONF_NAME)})] = str
+    fields[vol.Required(CONF_LIGHTS, description={"suggested_value": defaults.get(CONF_LIGHTS)})] = (
+        selector.EntitySelector(selector.EntitySelectorConfig(domain="light", multiple=True))
     )
+    return vol.Schema(fields)
 
 
 class MusicLightSyncConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -127,11 +132,16 @@ class MusicLightSyncConfigFlow(ConfigFlow, domain=DOMAIN):
                 return {CONF_HOST: entry.data[CONF_HOST], CONF_PORT: entry.data.get(CONF_PORT, DEFAULT_PORT)}
         return None
 
-    def _check_room(self, user_input: dict[str, Any], errors: dict[str, str]) -> dict[str, Any] | None:
-        """Fill in defaults (lights of the area, '<Area> Lights') and validate the bulbs."""
-        area = user_input[CONF_AREA]
-        lights = user_input.get(CONF_LIGHTS) or _lights_in_area(self.hass, area)
-        name = (user_input.get(CONF_NAME) or "").strip() or f"{_area_name(self.hass, area)} Lights"
+    def _area_taken(self, area: str, entry_id: str | None = None) -> bool:
+        return any(
+            e.data.get(CONF_AREA) == area and e.entry_id != entry_id
+            for e in self._async_current_entries(include_ignore=False)
+        )
+
+    def _check_room(self, area: str, user_input: dict[str, Any], errors: dict[str, str]) -> dict[str, Any] | None:
+        """Validate the room's name and bulbs."""
+        lights = list(user_input.get(CONF_LIGHTS) or [])
+        name = (user_input.get(CONF_NAME) or "").strip() or default_room_name(_area_name(self.hass, area))
         if not lights:
             errors[CONF_LIGHTS] = "no_lights"
             return None
@@ -145,35 +155,55 @@ class MusicLightSyncConfigFlow(ConfigFlow, domain=DOMAIN):
         return {CONF_AREA: area, CONF_NAME: name, CONF_LIGHTS: lights}
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Pick the room (area); its ZHA color lights are pre-selected."""
+        """Step 1: the room (area), plus the Music Assistant server for the first room."""
         errors: dict[str, str] = {}
         connection = self._connection()
         if user_input is not None:
-            room = self._check_room(user_input, errors)
-            if connection is None and not errors:
-                host = user_input[CONF_HOST].strip()
-                port = int(user_input[CONF_PORT])
-                if not await _can_connect(host, port):
+            area = user_input[CONF_AREA]
+            chosen = connection
+            if self._area_taken(area):
+                errors[CONF_AREA] = "area_taken"
+            elif chosen is None:
+                chosen = {CONF_HOST: user_input[CONF_HOST].strip(), CONF_PORT: int(user_input[CONF_PORT])}
+                if not await _can_connect(chosen[CONF_HOST], chosen[CONF_PORT]):
                     errors["base"] = "cannot_connect"
-                connection = {CONF_HOST: host, CONF_PORT: port}
-            if room is not None and not errors:
-                self._room = {**room, **connection}
+            if not errors and chosen is not None:
+                self._room = {CONF_AREA: area, **chosen}
+                return await self.async_step_room()
+
+        defaults = user_input or {}
+        fields: dict[Any, Any] = {
+            vol.Required(CONF_AREA, default=defaults.get(CONF_AREA) or vol.UNDEFINED): selector.AreaSelector()
+        }
+        if connection is None:
+            fields[vol.Required(CONF_HOST, default=defaults.get(CONF_HOST, _music_assistant_host(self.hass)))] = str
+            fields[vol.Required(CONF_PORT, default=defaults.get(CONF_PORT, DEFAULT_PORT))] = vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=65535)
+            )
+        return self.async_show_form(step_id="user", data_schema=vol.Schema(fields), errors=errors)
+
+    async def async_step_room(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Step 2: name and lights, pre-filled from the room."""
+        area = self._room[CONF_AREA]
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            room = self._check_room(area, user_input, errors)
+            if room is not None:
+                self._room.update(room)
                 if self._warned:
                     return await self.async_step_unsupported()
                 return await self._async_create_room()
-
-        defaults = user_input or {}
-        schema = _room_schema(self.hass, defaults)
-        if connection is None:
-            schema = schema.extend(
-                {
-                    vol.Required(CONF_HOST, default=defaults.get(CONF_HOST, _music_assistant_host(self.hass))): str,
-                    vol.Required(CONF_PORT, default=defaults.get(CONF_PORT, DEFAULT_PORT)): vol.All(
-                        vol.Coerce(int), vol.Range(min=1, max=65535)
-                    ),
-                }
-            )
-        return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
+        area_name = _area_name(self.hass, area)
+        defaults = user_input or {
+            CONF_NAME: default_room_name(area_name),
+            CONF_LIGHTS: _lights_in_area(self.hass, area),
+        }
+        return self.async_show_form(
+            step_id="room",
+            data_schema=_room_schema(defaults, with_area=False),
+            errors=errors,
+            description_placeholders={"room": area_name},
+        )
 
     async def async_step_unsupported(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Warn about bulbs the integration wasn't built for; allow continuing."""
@@ -205,8 +235,10 @@ class MusicLightSyncConfigFlow(ConfigFlow, domain=DOMAIN):
         entry = self._get_reconfigure_entry()
         errors: dict[str, str] = {}
         if user_input is not None:
-            room = self._check_room(user_input, errors)
-            if room is not None and not errors:
+            area = user_input[CONF_AREA]
+            if self._area_taken(area, entry.entry_id):
+                errors[CONF_AREA] = "area_taken"
+            elif (room := self._check_room(area, user_input, errors)) is not None:
                 self._room = room
                 if self._warned:
                     return await self.async_step_unsupported()
@@ -216,7 +248,9 @@ class MusicLightSyncConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_NAME: entry.data.get(CONF_NAME),
             CONF_LIGHTS: entry.data.get(CONF_LIGHTS),
         }
-        return self.async_show_form(step_id="reconfigure", data_schema=_room_schema(self.hass, defaults), errors=errors)
+        return self.async_show_form(
+            step_id="reconfigure", data_schema=_room_schema(defaults, with_area=True), errors=errors
+        )
 
     def _async_apply_reconfigure(self) -> ConfigFlowResult:
         entry = self._get_reconfigure_entry()
@@ -283,11 +317,11 @@ def _layout_error(hass: HomeAssistant, text: str | None, light_ids: list[str]) -
     from .controller import parse_layout  # noqa: PLC0415
 
     try:
-        count = len(resolve_bulbs(hass, light_ids))
+        ids = [b.entity_id for b in resolve_bulbs(hass, light_ids)]
     except BulbResolveError:
         return None
     try:
-        parse_layout(text, count)
+        parse_layout(text, ids)
     except ValueError:
         return "layout_invalid"
     return None

@@ -16,7 +16,7 @@ Music Assistant already analyzes the audio it decodes. This integration connects
 
 ## What to expect
 
-Each **Music Light Sync** entry is one room: its own bulbs, layout, settings, and its own player in Music Assistant ("Kitchen Lights", "Dining Room Lights"). Add rooms with **Add entry** on the integration page; each one shows up there with its device, **Music Sync - <Room>**, placed in the room's area.
+Each **Music Light Sync** entry is one room: its own bulbs, layout, settings, and its own player in Music Assistant, named like the entry ("Music Sync - Dining Room"). Add rooms with **Add entry** on the integration page; each one shows up there with its device, **Music Sync - <Room>**, placed in the room's area.
 
 Rooms work together:
 
@@ -87,14 +87,13 @@ Timing jitter is about 50–150 ms. Zigbee allows only 10–20 frames per second
 1. In HACS, open the three-dot menu, choose **Custom repositories**, add this repository's URL, and set the category to **Integration**.
 2. Install **Music Light Sync** and restart Home Assistant.
 3. Go to **Settings → Devices & services → Add integration → Music Light Sync** (later rooms: **Add entry** on the integration's page):
-   - **Room**: the area, e.g. Dining Room. Leave **Lights** empty to take every ZHA color light in it, or pick them (a light group helper is expanded in member order).
-   - **Name**: leave empty for `<Room> Lights`. This is the room's player in Music Assistant.
-   - **Host** / **Port** (first room only): pre-filled from your Music Assistant integration, `8927`.
+   - **Room**: the area, e.g. Dining Room. **Host** / **Port** (first room only): pre-filled from your Music Assistant integration, `8927`. A room can have one entry.
+   - Next step, pre-filled from the room: **Name** `Music Sync - <Room>` (the entry and the room's player in Music Assistant) and **Lights**, every ZHA color light in that area. Remove or add lights as needed; a light group helper is expanded in member order.
 4. To change a room's area, name or lights later: the room's **⋮ → Reconfigure**. It keeps its Music Assistant player.
 
 ## One-time setup in Music Assistant
 
-1. **Approve each room's player.** Go to **Settings → Players** and open the room's player (e.g. **Kitchen Lights**). Light players are hidden by default, so you may need to show hidden players first. Approve it with the one-click allow option rather than pairing. Until you do, the integration's Status sensor reads *Waiting for approval in Music Assistant*. Allowing it exposes nothing on the Home Assistant side, because the client only has the visualizer and color roles: no microphone and no audio output.
+1. **Each room's player** (e.g. **Music Sync - Dining Room**) appears under **Settings → Players**. Music Assistant hides visualizer players by default; the integration shows each room's player once (hide it again and it stays hidden). If the room's Status sensor reads *Waiting for approval in Music Assistant*, open the player and approve it with the one-click allow option rather than pairing; if it reads *Idle*, it is already connected and there is nothing to approve. Allowing it exposes nothing on the Home Assistant side, because the client only has the visualizer and color roles: no microphone and no audio output.
 2. **Check the Node can join Sendspin groups.** Open the **Living Room** (Node) player and confirm AirPlay is listed among its protocols. Music Assistant uses AirPlay 2 to keep the Node in sync with Sendspin members.
 
 ## Daily use: two paths
@@ -116,7 +115,7 @@ If Home Assistant stops, the integration hands back first. If it crashes or lose
 
 | Option | Recommendation |
 |---|---|
-| Bulb layout | Where each bulb is in the room: one `x, y` line per bulb, in the order of the *Lights* list, 0–100 across and down as seen from above. Party mode builds its pairs, splits and chase paths from it. Without a layout the bulbs are treated as a row. The kitchen is below. |
+| Bulb layout | Where each bulb is in the room: one `x, y` line per bulb, 0–100 across and down as seen from above. Start a line with the bulb's entity id (`light.x: 22, 29`) so the order of the *Lights* list doesn't matter, or with its number in that list (`3: 76, 72`); lines without either fill the remaining bulbs in *Lights* order. Party mode builds its pairs, splits and chase paths from it. Without a layout the bulbs are treated as a row. The kitchen is below. |
 | Music player | The room's Music Assistant player, e.g. `media_player.node_a7d8`. Party mode reads the volume, the time left in the track (for the outro) and track changes from it; the native hi-res path uses it for the ambient palette. |
 | ZHA group | Recommended. In ZHA, create a group with exactly this room's bulbs and pick it here. Whole-room changes (a drop's white flash) then take one multicast frame instead of one per bulb, which keeps drops on time. The option is refused if the group has other members. |
 | Light sync speakers | Which speakers' **- Light sync** players this room joins. All ticked (the default) also joins speakers added later. |
@@ -125,7 +124,7 @@ If Home Assistant stops, the integration hands back first. If it crashes or lose
 | Zigbee frame budget | 20 frames/s for the whole house (the default). Rooms playing at the same time share it; the lowest value set in any room applies. The governor backs off by itself if the mesh gets congested. |
 | Min. group spacing | 2 s. Multicast frames fill the coordinator's broadcast table, so don't go lower. |
 | Min/Max brightness | 15 % / 100 % |
-| Pause Adaptive Lighting during a show | On (default). Every Adaptive Lighting switch that controls this room's lights (found from Adaptive Lighting's own light lists, groups included) is turned off when the show starts and back on afterwards, if it was on. A switch shared by two rooms stays off until the last of them stops. The status sensor's `paused_during_show` attribute lists what will be paused. |
+| Pause Adaptive Lighting during a show | On (default). Every Adaptive Lighting switch that controls this room's lights (found from Adaptive Lighting's own light lists by Zigbee device, so an entry that lists the room's ZHA group light or a group helper counts) is turned off when the show starts and back on afterwards, if it was on. A switch shared by two rooms stays off until the last of them stops. The status sensor's `paused_during_show` attribute lists what will be paused. |
 | Pause during a show | Other automations that would fight the show, e.g. the room's occupancy and illuminance automations. |
 | Restore after | 10 s |
 
@@ -137,6 +136,15 @@ Kitchen layout (1 top center, 2 left upper, 3 right middle, 4 left lower, 5 righ
 62, 48
 23, 65
 63, 81
+```
+
+Dining room layout (1 top left, 2 top right, 3 bottom right, 4 bottom left; named, so the *Lights* order doesn't matter):
+
+```
+light.dinning_room_overhead_bulb_1: 22, 29
+light.dinning_room_overhead_bulb_2: 76, 29
+light.dinning_room_overhead_bulb_3: 76, 72
+light.dinning_room_overhead_bulb_4: 22, 73
 ```
 
 ## Entities

@@ -1,15 +1,23 @@
 {
   "domain": "music_light_sync",
   "name": "Music Light Sync",
-  "after_dependencies": ["zha", "group", "music_assistant", "media_player"],
+  "after_dependencies": [
+    "zha",
+    "group",
+    "music_assistant",
+    "media_player"
+  ],
   "codeowners": [],
   "config_flow": true,
   "dependencies": [],
   "documentation": "https://github.com/jacollins1/hasscustomlightsync",
-  "integration_type": "hub",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/jacollins1/hasscustomlightsync/issues",
-  "loggers": ["aiosendspin"],
-  "requirements": ["aiosendspin==10.2.0"],
-  "version": "0.3.1"
+  "loggers": [
+    "aiosendspin"
+  ],
+  "requirements": [
+    "aiosendspin==10.2.0"
+  ],
+  "version": "0.3.2"
 }
