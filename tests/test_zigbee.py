@@ -237,3 +237,36 @@ async def test_adaptive_lighting_found_through_a_zha_group_light(hass: HomeAssis
         assert adaptive_lighting_switches(hass, [bulbs[2].entity_id]) == [main.entity_id]  # one bulb is enough
     with patch("homeassistant.components.zha.helpers.get_zha_gateway", side_effect=KeyError):
         assert adaptive_lighting_switches(hass, [b.entity_id for b in bulbs]) == []  # ZHA not loaded
+
+
+def test_color_record_from_bulb_attributes() -> None:
+    from custom_components.music_light_sync.zigbee import color_record  # noqa: PLC0415
+
+    assert color_record({8: 2, 7: 454, 3: 1, 4: 2}) == {"mode": "color_temp", "mireds": 454}
+    assert color_record({8: 1, 7: 454, 3: 30000, 4: 20000}) == {"mode": "xy", "x": 30000, "y": 20000}
+    assert color_record({8: 0, 0: 10, 1: 254}) == {"mode": "hs", "hue": 10, "saturation": 254}
+    assert color_record({7: 454}) is None  # no color mode: nothing to trust
+
+
+async def test_color_temperature_written_while_off_reaches_the_bulb(hass: HomeAssistant) -> None:
+    """move_to_color_temp with ZCL 'execute if off', through the stock command (no quirk rewrite)."""
+    device, frames, patcher = _zigpy_bulb()
+    try:
+        cluster = device.endpoints[11].in_clusters[0x0300]
+        cluster._attr_cache.update({8: 2, 7: 370})  # noqa: SLF001 - what ZHA last saw
+        zha_device = SimpleNamespace(async_get_cluster=lambda ep, cid: device.endpoints[ep].in_clusters[cid])
+        gateway = SimpleNamespace(get_device=lambda ieee: zha_device)
+        with patch("homeassistant.components.zha.helpers.get_zha_gateway", return_value=gateway):
+            out = ZhaOutput(hass, [Bulb("light.k1", IEEE, 11, "LCB002", "Signify Netherlands B.V.")], None)
+            with patch.object(type(cluster), "read_attributes", wraps=cluster.read_attributes) as read:
+                read.side_effect = [TimeoutError(), ({8: 2, 7: 370}, {})]  # live read fails, cache answers
+                assert await out.async_read_color(0) == {"mode": "color_temp", "mireds": 370}
+            await out.async_set_color_while_off(0, {"mode": "color_temp", "mireds": 370})
+        cluster_id, command, data = frames[-1]
+        assert (cluster_id, command) == (0x0300, 0x0A)
+        schema = cluster.server_commands[0x0A].schema
+        args = schema.deserialize(_payload(cluster, data))[0]
+        assert args.color_temp_mireds == 370 and args.transition_time == 0
+        assert int(args.options_mask) == 1 and int(args.options_override) == 1  # execute if off
+    finally:
+        patcher.stop()

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Final
 
 DOMAIN: Final = "music_light_sync"
-VERSION: Final = "0.3.4"
+VERSION: Final = "0.3.5"
 
 # Config entry data
 CONF_HOST: Final = "host"

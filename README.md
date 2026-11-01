@@ -112,6 +112,8 @@ The **Sync** switch arms the integration. While it is on and Music Assistant str
 1. The bulbs' current state and the list of paused entities are written to `.storage`.
 2. The entities you chose to pause are turned off, and the bulbs switch on in palette colors.
 3. When the music has been stopped for longer than *Restore after* (default 10 s), the bulbs return to exactly their pre-show state and the paused entities turn back on.
+   - A bulb that was on gets its brightness and color temperature (or color) back.
+   - A bulb that was off is turned off again and then gets its own color temperature (or color) back while it stays off, using the ZCL "execute if off" option, so the next time it comes on (from Home Assistant or a wall switch) it isn't in the show's last color. Home Assistant doesn't show an off bulb's color temperature, so it is read from the bulb itself when the show starts.
 
 If Home Assistant stops, the integration hands back first. If it crashes or loses power mid-show, the hand-back runs at the next start. An unavailable bulb stays recorded and is retried every minute.
 

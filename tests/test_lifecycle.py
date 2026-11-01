@@ -474,3 +474,76 @@ async def test_a_pin_from_another_room_does_not_count(hass: HomeAssistant) -> No
     pins = {devices[0]: Pin(1.0, 2.0, dining.id), devices[1]: Pin(3.0, 4.0, "kitchen")}  # moved since pinned
     positions, missing = room_positions(hass, pins, lights)
     assert positions is None and missing == [lights[1]]
+
+
+async def test_off_bulbs_get_their_own_color_temperature_back(hass: HomeAssistant, hass_storage: dict) -> None:
+    """A bulb that was off keeps the show's last color unless it's put back. Its
+    color temperature is read from the bulb before the show and written back
+    after it, while the bulb stays off; a bulb that was on is restored by
+    Home Assistant as before."""
+    lights = _lights(hass)
+    hass.states.async_set(lights[1], "off", {})  # off: HA shows no color temperature
+    async_mock_service(hass, "light", "turn_on")
+    turned_off = async_mock_service(hass, "light", "turn_off")
+    entry = _entry(hass, lights, [])
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    controller = entry.runtime_data
+    reads: list[int] = []
+    written: list[tuple[int, dict]] = []
+
+    async def read_color(index: int) -> dict:
+        reads.append(index)
+        return {"mode": "color_temp", "mireds": 370}
+
+    async def set_color(index: int, color: dict) -> None:
+        assert [c.data["entity_id"] for c in turned_off] == [lights[1]]  # after it was turned off
+        hass.states.async_set(lights[1], "off", {})
+        written.append((index, color))
+
+    with (
+        patch.object(controller.output, "async_read_color", side_effect=read_color),
+        patch.object(controller.output, "async_set_color_while_off", side_effect=set_color),
+        patch("custom_components.music_light_sync.controller.OFF_RECOLOR_DELAY_S", 0),
+    ):
+        controller.on_stream_start(True, ("beat",))
+        await _settle(hass)
+        assert reads == [1]  # only the bulb that was off is read
+        key = f"{DOMAIN}.{entry.entry_id}.handback"
+        assert hass_storage[key]["data"]["lights"][lights[1]]["off_color"] == {"mode": "color_temp", "mireds": 370}
+        controller.on_stream_end()
+        await _settle(hass)
+    assert written == [(1, {"mode": "color_temp", "mireds": 370})]
+    assert key not in hass_storage
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_off_bulb_recolor_failure_is_retried(hass: HomeAssistant, hass_storage: dict) -> None:
+    lights = _lights(hass, 1)
+    hass.states.async_set(lights[0], "off", {})
+    async_mock_service(hass, "light", "turn_on")
+    async_mock_service(hass, "light", "turn_off")
+    entry = _entry(hass, lights, [])
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    controller = entry.runtime_data
+    attempts: list[dict] = []
+
+    async def flaky(index: int, color: dict) -> None:
+        attempts.append(color)
+        if len(attempts) == 1:
+            raise HomeAssistantError("no answer")
+
+    with (
+        patch.object(controller.output, "async_read_color", AsyncMock(return_value={"mode": "xy", "x": 1, "y": 2})),
+        patch.object(controller.output, "async_set_color_while_off", side_effect=flaky),
+        patch("custom_components.music_light_sync.controller.OFF_RECOLOR_DELAY_S", 0),
+    ):
+        controller.on_stream_start(True, ("beat",))
+        await _settle(hass)
+        controller.on_stream_end()
+        await _settle(hass)
+        key = f"{DOMAIN}.{entry.entry_id}.handback"
+        assert list(hass_storage[key]["data"]["lights"]) == lights  # kept for the retry
+        await controller._async_retry_hand_back()  # noqa: SLF001
+    assert len(attempts) == 2
+    assert key not in hass_storage
+    assert await hass.config_entries.async_unload(entry.entry_id)

@@ -101,6 +101,7 @@ LOOP_ERROR_LOG_EVERY_S = 30.0
 BULB_FAILS_TO_REST = 4  # consecutive failed frames before a bulb is rested
 BULB_REST_S = 60
 HANDBACK_RETRY_S = 60.0
+OFF_RECOLOR_DELAY_S = 1.5  # after the 1 s fade-out of a bulb that was off before the show
 HANDBACK_MAX_RETRIES = 30  # half an hour of retries, then the record waits for the next show
 _LIGHT_ATTRS = ("brightness", "color_mode", "color_temp_kelvin", "xy_color", "hs_color", "effect")
 
@@ -714,6 +715,16 @@ class LightSyncController:
             for bulb in self.bulbs
             if (captured := capture_light(self.hass.states.get(bulb.entity_id))) is not None
         }
+        # An off bulb still holds a color (its color temperature, usually) that
+        # Home Assistant doesn't show while it's off. Read it from the bulb before
+        # the show changes it, so it can be put back without switching it on.
+        if self.output is not None:
+            for index, bulb in enumerate(self.bulbs):
+                captured = current.get(bulb.entity_id)
+                if captured is None or captured["state"] != STATE_OFF or bulb.entity_id in self._captured:
+                    continue
+                if (color := await self.output.async_read_color(index)) is not None:
+                    captured["off_color"] = color
         self._captured = {**current, **self._captured}
         leftover_paused = list(self._paused)  # already off since the interrupted show
         to_pause = [
@@ -742,6 +753,21 @@ class LightSyncController:
             paused.append(entity_id)
         self._paused = [*leftover_paused, *paused]
         await self._async_save_handback()
+
+    async def _async_recolor_off(self, entity_id: str, color: dict[str, Any]) -> bool:
+        """Put an off bulb's recorded color back; False to retry later."""
+        index = next((i for i, b in enumerate(self.bulbs) if b.entity_id == entity_id), None)
+        if index is None or self.output is None:
+            return True  # no longer one of this room's bulbs: nothing to do
+        state = self.hass.states.get(entity_id)
+        if state is not None and state.state == STATE_ON:
+            return True  # someone switched it on meanwhile: leave it as they set it
+        try:
+            await self.output.async_set_color_while_off(index, color)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Could not put back the color of %s: %s", entity_id, err)
+            return False
+        return True
 
     async def _async_save_handback(self) -> None:
         if self._captured or self._paused:
@@ -782,6 +808,7 @@ class LightSyncController:
         """
         captured_all, paused_all = dict(self._captured), list(self._paused)
         failed_lights: dict[str, dict[str, Any]] = {}
+        recolor: list[tuple[str, dict[str, Any]]] = []
         for entity_id, captured in captured_all.items():
             state = self.hass.states.get(entity_id)
             if state is None or state.state == STATE_UNAVAILABLE:
@@ -794,6 +821,16 @@ class LightSyncController:
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("Could not restore %s: %s", entity_id, err)
                 failed_lights[entity_id] = captured
+                continue
+            if captured.get("off_color"):
+                recolor.append((entity_id, captured))
+        if recolor:
+            # Off bulbs get their own color back once the fade-out is over, while
+            # they stay off: the next time they come on, it's in that color.
+            await asyncio.sleep(OFF_RECOLOR_DELAY_S)
+            for entity_id, captured in recolor:
+                if not await self._async_recolor_off(entity_id, captured["off_color"]):
+                    failed_lights[entity_id] = captured
         failed_paused: list[str] = []
         for entity_id in paused_all:
             if (other := self._room_still_using(entity_id)) is not None:

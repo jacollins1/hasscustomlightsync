@@ -36,6 +36,14 @@ COLOR_CLUSTER = 0x0300
 MOVE_TO_LEVEL = 0x00
 MOVE_TO_HUE_SAT = 0x06
 MOVE_TO_COLOR = 0x07
+MOVE_TO_COLOR_TEMP = 0x0A
+# Color cluster attributes: what the bulb itself holds as its color, on or off.
+ATTR_CURRENT_HUE, ATTR_CURRENT_SAT, ATTR_CURRENT_X, ATTR_CURRENT_Y = 0x0000, 0x0001, 0x0003, 0x0004
+ATTR_COLOR_TEMP, ATTR_COLOR_MODE = 0x0007, 0x0008
+# ZCL "execute if off": the bulb takes the new color while staying off (honored by
+# the house's Hue and Third Reality bulbs, checked live 2026-11-01).
+EXECUTE_IF_OFF = {"options_mask": 0x01, "options_override": 0x01}
+READ_TIMEOUT_S = 1.5
 
 COLOR_XY = "xy"
 COLOR_HS = "hs"
@@ -260,6 +268,21 @@ def _with_format(bulb: Bulb, room_format: str) -> Bulb:
     )
 
 
+def color_record(values: dict[Any, Any]) -> dict[str, Any] | None:
+    """A bulb's color from Color cluster attribute values (keyed by attribute id)."""
+    mode = values.get(ATTR_COLOR_MODE)
+    if mode is None:
+        return None
+    mode = int(mode)
+    if mode == 2 and values.get(ATTR_COLOR_TEMP) is not None:
+        return {"mode": "color_temp", "mireds": int(values[ATTR_COLOR_TEMP])}
+    if mode == 1 and values.get(ATTR_CURRENT_X) is not None and values.get(ATTR_CURRENT_Y) is not None:
+        return {"mode": "xy", "x": int(values[ATTR_CURRENT_X]), "y": int(values[ATTR_CURRENT_Y])}
+    if mode == 0 and values.get(ATTR_CURRENT_HUE) is not None and values.get(ATTR_CURRENT_SAT) is not None:
+        return {"mode": "hs", "hue": int(values[ATTR_CURRENT_HUE]), "saturation": int(values[ATTR_CURRENT_SAT])}
+    return None
+
+
 def unsupported_models(bulbs: list[Bulb]) -> list[str]:
     """'light.x (model)' for every bulb this integration was not built for."""
     return [f"{b.entity_id} ({b.model or 'unknown model'})" for b in bulbs if not b.supported]
@@ -354,6 +377,52 @@ class ZhaOutput:
             if not self._direct:
                 await self._send_service(cmd)
         return time.monotonic() - start
+
+    async def async_read_color(self, target: int) -> dict[str, Any] | None:
+        """The color a bulb holds (also while off), as stored in the hand-back record.
+
+        ``{"mode": "color_temp", "mireds": 370}``, ``{"mode": "xy", "x": .., "y": ..}``
+        or ``{"mode": "hs", "hue": .., "saturation": ..}`` (raw ZCL values); None
+        if it can't be read. Reads the bulb; falls back to ZHA's cached values.
+        """
+        if not self._direct:
+            return None
+        attrs = [ATTR_COLOR_MODE, ATTR_COLOR_TEMP, ATTR_CURRENT_X, ATTR_CURRENT_Y, ATTR_CURRENT_HUE, ATTR_CURRENT_SAT]
+        try:
+            cluster = self._cluster(target, COLOR_CLUSTER)
+        except Exception:  # noqa: BLE001 - ZHA not ready: nothing to record
+            return None
+        values: dict[Any, Any] = {}
+        try:
+            async with asyncio.timeout(READ_TIMEOUT_S):
+                values, _failed = await cluster.read_attributes(attrs, allow_cache=False)
+        except Exception:  # noqa: BLE001 - bulb slow or unreachable: use what ZHA last saw
+            try:
+                values, _failed = await cluster.read_attributes(attrs, allow_cache=True, only_cache=True)
+            except Exception:  # noqa: BLE001
+                return None
+        return color_record(values)
+
+    async def async_set_color_while_off(self, target: int, color: dict[str, Any]) -> None:
+        """Put a recorded color back on a bulb that is off, without switching it on."""
+        from zigpy.zcl import Cluster  # noqa: PLC0415
+
+        cluster = self._cluster(target, COLOR_CLUSTER)
+        mode = color.get("mode")
+        if mode == "color_temp":
+            command, params = MOVE_TO_COLOR_TEMP, {"color_temp_mireds": int(color["mireds"])}
+        elif mode == "xy":
+            command, params = MOVE_TO_COLOR, {"color_x": int(color["x"]), "color_y": int(color["y"])}
+        elif mode == "hs":
+            command, params = MOVE_TO_HUE_SAT, {"hue": int(color["hue"]), "saturation": int(color["saturation"])}
+        else:
+            return
+        async with asyncio.timeout(SEND_TIMEOUT_S):
+            # The stock ZCL command: a quirk must not rewrite the recorded format.
+            result = await Cluster.command(cluster, command, **params, transition_time=0, **EXECUTE_IF_OFF)
+        status = getattr(result, "status", None)
+        if status is not None and int(status) != 0:
+            raise HomeAssistantError(f"Bulb answered with ZCL status {status}")
 
     def _color_frame(self, cmd: Command) -> tuple[int, dict[str, int]]:
         """ZCL command id and parameters for a color change, in the target's format."""
